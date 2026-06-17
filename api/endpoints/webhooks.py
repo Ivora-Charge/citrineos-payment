@@ -14,6 +14,17 @@ from schemas.checkouts import RequestStartStopStatusEnumType
 router = APIRouter()
 
 
+def citrineos_call_succeeded(response) -> bool:
+    """citrineos-core main returns a list of per-station confirmations from the
+    message API where older versions returned a single object."""
+    if response.status_code != 200:
+        return False
+    body = response.json()
+    if isinstance(body, list):
+        return any(item.get("success") for item in body if isinstance(item, dict))
+    return bool(isinstance(body, dict) and body.get("success"))
+
+
 @router.post("/stripe")
 async def stripe_webhook(
     request: Request,
@@ -158,9 +169,8 @@ async def handle_web_portal(
         json_payload=request_body,
     )
     remote_start_stop = RequestStartStopStatusEnumType.REJECTED
-    if response.status_code == 200:
-        if response.json().get("success"):
-            remote_start_stop = RequestStartStopStatusEnumType.ACCEPTED
+    if citrineos_call_succeeded(response):
+        remote_start_stop = RequestStartStopStatusEnumType.ACCEPTED
     db_checkout.remote_request_status = remote_start_stop
 
     db.add(db_checkout)
@@ -235,9 +245,8 @@ async def handle_scan_and_charge(
         json_payload=request_body,
     )
     remote_start_stop = RequestStartStopStatusEnumType.REJECTED
-    if response.status_code == 200:
-        if response.json().get("success"):
-            remote_start_stop = RequestStartStopStatusEnumType.ACCEPTED
+    if citrineos_call_succeeded(response):
+        remote_start_stop = RequestStartStopStatusEnumType.ACCEPTED
     db_checkout.remote_request_status = remote_start_stop
     db_checkout.payment_intent_id = paymentIntentId
     db.add(db_checkout)

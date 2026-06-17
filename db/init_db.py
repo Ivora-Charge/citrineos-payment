@@ -18,6 +18,13 @@ from sqlalchemy.orm import sessionmaker, relationship
 
 engine = create_engine(
     f"postgresql://{Config.DB_USER}:{Config.DB_PASSWORD}@{Config.DB_HOST}:{Config.DB_PORT}/{Config.DB_DATABASE}",
+    # the event consumer opens sessions outside FastAPI's Depends() lifecycle;
+    # give the pool headroom and recover stale connections
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=10,
+    pool_recycle=1800,
+    pool_pre_ping=True,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -158,14 +165,15 @@ class Checkout(Base):
 # To review full models
 
 
+# NOTE: column mappings below follow citrineos-core migration 20260427000000
+# (rename-charging-station-columns): the station identifier columns are now
+# "ocppConnectionName" and the old surrogate ids were renamed. Attribute names
+# are kept so the rest of this codebase keeps working.
 class OcppEvse(Base):
     __tablename__ = "Evses"
 
-    databaseId = Column(Integer, primary_key=True, autoincrement="auto", index=True)
-    id = Column(Integer, nullable=False)
-    connectorId = Column(
-        Integer,
-    )
+    databaseId = Column("id", Integer, primary_key=True, autoincrement="auto", index=True)
+    id = Column("evseTypeId", Integer, nullable=False)
 
     __table_args__ = ()
 
@@ -174,15 +182,17 @@ class Transaction(Base):
     __tablename__ = "Transactions"
 
     id = Column(Integer, primary_key=True, autoincrement="auto", index=True)
-    stationId = Column(String(255), nullable=False)
+    stationId = Column("ocppConnectionName", String(255), nullable=False)
     transactionId = Column(String(255), nullable=False)
     isActive = Column(Boolean, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("stationId", "transactionId", name="stationId_transactionId"),
+        UniqueConstraint(
+            "ocppConnectionName", "transactionId", name="stationId_transactionId"
+        ),
     )
 
-    evseDatabaseId = Column(Integer, ForeignKey("Evses.databaseId"))
+    evseDatabaseId = Column("evseId", Integer, ForeignKey("Evses.id"))
     evse = relationship("OcppEvse")
 
 
@@ -191,13 +201,16 @@ class MessageInfo(Base):
 
     databaseId = Column(Integer, primary_key=True, autoincrement="auto", index=True)
     stationId = Column(
+        "ocppConnectionName",
         String(255),
     )
     id = Column(
         Integer,
     )
 
-    __table_args__ = (UniqueConstraint("stationId", "id", name="stationId_id"),)
+    __table_args__ = (
+        UniqueConstraint("ocppConnectionName", "id", name="stationId_id"),
+    )
 
 
 def init_db() -> None:

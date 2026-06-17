@@ -7,7 +7,7 @@ import stripe
 from sqlalchemy.orm import Session
 
 from db.init_db import get_db, Checkout, Connector, Evse, Location, Operator
-from utils.utils import generate_pricing
+from utils.utils import generate_pricing, stripe_account_kwargs
 
 
 class OcppIntegration:
@@ -47,8 +47,8 @@ class OcppIntegration:
 
         suc_intent = stripe.PaymentIntent.capture(
             intent=db_checkout.payment_intent_id,
-            stripe_account=db_operator.stripe_account_id,
             amount_to_capture=pricing.total_costs_gross,
+            **stripe_account_kwargs(db_operator.stripe_account_id),
         )
 
         if suc_intent.status != "succeeded":

@@ -11,7 +11,7 @@ from db.init_db import (
 )
 
 from schemas.checkouts import Checkout, CheckoutCreate, CheckoutCreateResponse
-from utils.utils import generate_pricing
+from utils.utils import generate_pricing, stripe_account_kwargs
 
 router = APIRouter()
 
@@ -58,7 +58,7 @@ def create_checkout(request_body: CheckoutCreate, db: Session = Depends(get_db))
         payment_intent_data={
             "capture_method": "manual",
         },
-        stripe_account=location.operator.stripe_account_id,
+        **stripe_account_kwargs(location.operator.stripe_account_id),
         mode="payment",
         success_url=f"{request_body.success_url}/{db_checkout.id}",
         cancel_url=request_body.cancel_url,

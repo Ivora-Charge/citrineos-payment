@@ -5,9 +5,10 @@ from typing import List, Tuple
 from aio_pika import connect
 from aio_pika.abc import AbstractExchange, AbstractIncomingMessage
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_core import ValidationError
 import requests
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 import stripe
 import qrcode
@@ -25,6 +26,7 @@ from db.init_db import (
 
 from integrations.integration import FileIntegration, OcppIntegration
 from schemas.status_notification import StatusNotificationRequest
+from utils.utils import stripe_account_kwargs
 from schemas.transaction_event import (
     MeasurandEnumType,
     TransactionEventEnumType,
@@ -44,7 +46,9 @@ class CitrineOSevent(BaseModel):
 
 
 class CitrineOSeventHeaders(BaseModel):
-    stationId: str
+    # citrineos-core main renamed the event header stationId → ocppConnectionName
+    stationId: str = Field(alias="ocppConnectionName")
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class CitrineOSIntegration(OcppIntegration):
@@ -72,20 +76,31 @@ class CitrineOSIntegration(OcppIntegration):
                 "status": "Accepted",
             },
         }
-        module = "evdriver"
-        data = "authorization"
-        url_path = f"{module}/{data}"
-        request_url = (
-            f"{Config.CITRINEOS_DATA_API_URL}/{url_path}"
-            f"?idToken={idToken['idToken']}"
-            f"&type={idToken['type']}"
-        )
-
-        response = requests.put(request_url, json=request_body)
-        if response.status_code == 200:
+        # citrineos-core main no longer exposes PUT /data/evdriver/authorization;
+        # authorizations are managed in the database (as the operator UI does),
+        # so insert the row directly.
+        try:
+            db: Session = next(get_db())
+            db.execute(
+                sql_text(
+                    'INSERT INTO "Authorizations" '
+                    '("idToken", "idTokenType", "status", "tenantId", '
+                    '"additionalInfo", "createdAt", "updatedAt") '
+                    "VALUES (:id_token, :id_token_type, 'Accepted', 1, "
+                    "CAST(:additional_info AS jsonb), now(), now()) "
+                    'ON CONFLICT ("tenantId", "idToken", "idTokenType") DO NOTHING'
+                ),
+                {
+                    "id_token": idToken["idToken"],
+                    "id_token_type": idToken["type"],
+                    "additional_info": json.dumps(idToken["additionalInfo"]),
+                },
+            )
+            db.commit()
             return request_body
-        exception(" [CitrineOS] Error while creating authorization: %r", response)
-        return
+        except Exception as e:
+            exception(" [CitrineOS] Error while creating authorization: %r", e)
+            return
 
     def send_citrineos_message(
         self, station_id: str, tenant_id: str, url_path: str, json_payload: str
@@ -387,7 +402,7 @@ class CitrineOSIntegration(OcppIntegration):
             },
             payment_method_types=["card"],
             restrictions={"completed_sessions": {"limit": int(1)}},
-            stripe_account=stripe_account_id,
+            **stripe_account_kwargs(stripe_account_id),
         )
         return transactionPaymentLink.url
 

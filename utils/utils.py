@@ -59,3 +59,12 @@ def generate_pricing(
         payment_costs_gross=transaction_summary.payment_costs_gross.get_amount_in_sub_unit(),
         payment_costs_net=transaction_summary.payment_costs_net.get_amount_in_sub_unit(),
     )
+
+
+def stripe_account_kwargs(stripe_account_id):
+    """Local-dev adaptation: operators without a real Connect account (no
+    "acct_..." id) charge directly on the platform account, so the
+    stripe_account header is omitted."""
+    if stripe_account_id and stripe_account_id.startswith("acct_"):
+        return {"stripe_account": stripe_account_id}
+    return {}
