@@ -43,7 +43,7 @@ class Pricing(BaseModel):
 class Checkout(CheckoutBase):
     model_config = ConfigDict(from_attributes=True)
 
-    payment_intent_id: str
+    payment_intent_id: str | None
     connector_id: int
     tariff_id: int
     remote_request_status: RequestStartStopStatusEnumType | None
