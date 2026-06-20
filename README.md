@@ -86,7 +86,60 @@ STRIPE_ENDPOINT_SECRET_CONNECT="whsec_some-stripe-signing-secret"
 
 # Development Setup
 
-To set up your development environment, run the following commands:
+## Quick start (full stack)
+
+`./setup_payment_stack.sh` brings up the entire payment stack from a clean
+environment in a single run and then starts the service. It is idempotent —
+re-running skips work that is already done.
+
+```bash
+./setup_payment_stack.sh
+```
+
+When it finishes, the service is running at http://localhost:9010 (logs in
+`payment.log`, pid in `payment.pid`; stop it with `kill $(cat payment.pid)`).
+
+### What it does
+
+1. **citrineos-core deps** — checks Postgres (5432), RabbitMQ (5672) and the
+   CitrineOS API (8080). If they are down it starts citrineos-core from the
+   sibling repo's `docker-compose.local.yml` and waits for them.
+2. **Directus** — brings up the QR-code host on `:8055`
+   (`docker-compose.directus.yml`, sqlite-backed) and waits for it to be healthy.
+3. **QR-code folder** — seeds the folder id from `CITRINEOS_DIRECTUS_QR_CODE_FOLDER`
+   into Directus so uploads have a home.
+4. **Python venv** — creates `.venv` (Python 3.10) and installs `requirements.txt`
+   (and `dev-requirements.txt`).
+5. **Frontend** — builds `frontend/build` inside a throwaway `node:20` container,
+   so no Node install is required on the host.
+6. **Launch** — starts the FastAPI app on `:9010` and verifies `/health_check`.
+
+### Prerequisites
+
+- Docker (your user must be in the `docker` group — the script re-execs via
+  `sg docker` if the group isn't active in your shell yet).
+- `python3.10` on `PATH`.
+- A sibling `../citrineos-core` checkout (only needed if the core deps aren't
+  already running).
+- A `.env` file (the script copies `.env.example` if one is missing — fill in
+  real Stripe keys and any other secrets).
+
+### Toggles
+
+```bash
+FORCE_FRONTEND=1 ./setup_payment_stack.sh   # rebuild the frontend even if frontend/build exists
+NO_START=1 ./setup_payment_stack.sh         # set everything up but don't launch the app
+```
+
+### Manual step: public QR assets
+
+Boot and QR-code generation work out of the box, but for QR images to be served
+publicly you must grant **public read access** to the QR-code folder's assets in
+Directus (Settings → Access Policies). The script prints a reminder about this.
+
+## Manual setup
+
+To set up only the Python environment, run:
 
 ```bash
 ./deploy_local.sh

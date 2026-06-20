@@ -111,6 +111,10 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Payment stack runtime artifacts (setup_payment_stack.sh)
+payment.pid
+payment.log
+
 # Environments
 .env
 .venv
