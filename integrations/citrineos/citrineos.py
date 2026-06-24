@@ -2,7 +2,8 @@ from enum import Enum
 from io import BytesIO
 import json
 from typing import List, Tuple
-from aio_pika import connect
+import asyncio
+from aio_pika import connect_robust
 from aio_pika.abc import AbstractExchange, AbstractIncomingMessage
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
@@ -114,8 +115,35 @@ class CitrineOSIntegration(OcppIntegration):
         return requests.post(request_url, json=json_payload)
 
     async def receive_events(self, app: FastAPI = None) -> None:
+        # Outer reconnect loop: a broker restart (or any connection drop) must
+        # not permanently kill consumption. connect_robust re-establishes the
+        # connection/channel/declarations transparently; the loop additionally
+        # guards against the consume task exiting on an unexpected error.
+        backoff = 1
+        while True:
+            print(" [CitrineOS] Receiving events...")
+            try:
+                await self._consume_events()
+                # _consume_events only returns when the iterator ends (e.g. the
+                # connection closed) — loop and reconnect.
+                warning(" [CitrineOS] Event consumer stopped, reconnecting...")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                exception(
+                    " [CitrineOS] Event consumer crashed, reconnecting in %ss: %r",
+                    backoff,
+                    e.__str__(),
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+                continue
+            backoff = 1
+            await asyncio.sleep(1)
+
+    async def _consume_events(self) -> None:
         # Perform connection
-        connection = await connect(
+        connection = await connect_robust(
             ssl=Config.MESSAGE_BROKER_SSL_ACTIVE,
             host=Config.MESSAGE_BROKER_HOST,
             port=Config.MESSAGE_BROKER_PORT,
@@ -124,60 +152,66 @@ class CitrineOSIntegration(OcppIntegration):
             virtualhost=Config.MESSAGE_BROKER_VHOST,
         )
 
-        # Creating a channel
-        channel = await connection.channel()
-        exchange: AbstractExchange = await channel.declare_exchange(
-            name=Config.MESSAGE_BROKER_EXCHANGE_NAME,
-            type=Config.MESSAGE_BROKER_EXCHANGE_TYPE,
-        )
-
-        # Declaring queue
-        queue = await channel.declare_queue(
-            Config.MESSAGE_BROKER_EVENT_CONSUMER_QUEUE_NAME, durable=True
-        )
-
-        # Bind headers
-        arguments_list = [
-            {
-                "action": "TransactionEvent",
-                "state": "1",
-                "x-match": "all",
-            },
-            {
-                "action": "StatusNotification",
-                "state": "1",
-                "x-match": "all",
-            },
-        ]
-        for arguments in arguments_list:
-            await queue.bind(
-                exchange=exchange,
-                routing_key="",
-                arguments=arguments,
+        async with connection:
+            # Creating a channel
+            channel = await connection.channel()
+            exchange: AbstractExchange = await channel.declare_exchange(
+                name=Config.MESSAGE_BROKER_EXCHANGE_NAME,
+                type=Config.MESSAGE_BROKER_EXCHANGE_TYPE,
             )
 
-        info(" [CitrineOS] Awaiting events with keys: %r ", arguments_list.__str__())
+            # Declaring queue
+            queue = await channel.declare_queue(
+                Config.MESSAGE_BROKER_EVENT_CONSUMER_QUEUE_NAME, durable=True
+            )
 
-        # Start listening the queue with name 'hello'
-        async with queue.iterator() as qiterator:
-            message: AbstractIncomingMessage
-            async for message in qiterator:
-                try:
-                    async with (
-                        message.process()
-                    ):  # Processor acknowledges messages implicitly
-                        debug(
-                            f" [CitrineOS] event_message({message.headers.__str__()})"
+            # Bind headers
+            arguments_list = [
+                {
+                    "action": "TransactionEvent",
+                    "state": "1",
+                    "x-match": "all",
+                },
+                {
+                    "action": "StatusNotification",
+                    "state": "1",
+                    "x-match": "all",
+                },
+            ]
+            for arguments in arguments_list:
+                await queue.bind(
+                    exchange=exchange,
+                    routing_key="",
+                    arguments=arguments,
+                )
+
+            info(
+                " [CitrineOS] Awaiting events with keys: %r ",
+                arguments_list.__str__(),
+            )
+
+            # Start listening the queue
+            async with queue.iterator() as qiterator:
+                message: AbstractIncomingMessage
+                async for message in qiterator:
+                    try:
+                        async with (
+                            message.process()
+                        ):  # Processor acknowledges messages implicitly
+                            debug(
+                                f" [CitrineOS] event_message({message.headers.__str__()})"
+                            )
+                            await self.process_incoming_event(
+                                event_message=message, exchange=exchange
+                            )
+                            debug(
+                                " [CitrineOS] Event processed successfully: %r",
+                                message.headers.__str__(),
+                            )
+                    except Exception:
+                        exception(
+                            " [CitrineOS] Processing error for message %r", message
                         )
-                        await self.process_incoming_event(
-                            event_message=message, exchange=exchange
-                        )
-                        debug(
-                            " [CitrineOS] Event processed successfully: %r",
-                            message.headers.__str__(),
-                        )
-                except Exception:
-                    exception(" [CitrineOS] Processing error for message %r", message)
 
     async def process_incoming_event(
         self, event_message: AbstractIncomingMessage, exchange: AbstractExchange

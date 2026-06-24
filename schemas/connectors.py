@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class ConnectorPowerType(str, Enum):
@@ -17,3 +17,10 @@ class Connector(BaseModel):
     max_voltage: int
     max_amperage: int
     tariff_id: int | None
+
+    @field_validator("power_type", mode="before")
+    @classmethod
+    def normalize_power_type(cls, v):
+        if v == "AC":
+            return ConnectorPowerType.AC_1_PHASE
+        return v

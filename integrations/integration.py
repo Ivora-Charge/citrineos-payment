@@ -15,6 +15,7 @@ class OcppIntegration:
         pass
 
     async def receive_events(self, app: FastAPI = None) -> None:
+        print(" [OcppIntegration] Receiving events...ddddd")
         pass
 
     async def capture_payment_transaction(
