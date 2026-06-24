@@ -48,7 +48,13 @@ app.ocpp_integration = ocpp_integration
 @app.on_event("startup")
 async def startup_event():
     loop = get_event_loop()
-    loop.create_task(coro=ocpp_integration.receive_events())
+    # Hold a strong reference to the consumer task. asyncio only keeps a weak
+    # reference to tasks, so a fire-and-forget create_task() can be garbage
+    # collected mid-flight ("Task was destroyed but it is pending!"), silently
+    # killing event consumption. Keeping it on app.state prevents that.
+    app.state.event_consumer_task = loop.create_task(
+        coro=ocpp_integration.receive_events()
+    )
 
 
 """ Add the API router to the web app """
