@@ -12,8 +12,10 @@ from integrations.citrineos.citrineos import CitrineOSIntegration
 from uvicorn import run
 import stripe
 
-from db.init_db import init_db
+from db.init_db import init_db, SessionLocal
+from catalog.sync import upsert_payment_catalog
 from integrations.integration import FileIntegration, OcppIntegration
+from logging import error, info
 
 basicConfig(format=Config.LOG_FORMAT, level=Config.LOG_LEVEL)
 
@@ -45,8 +47,46 @@ ocpp_integration: OcppIntegration = CitrineOSIntegration(file_integration)
 app.ocpp_integration = ocpp_integration
 
 
+def _auto_seed() -> None:
+    """Dev-only bootstrap: seed one catalog chain from Config.SEED_* when
+    AUTO_SEED=true. Delegates to the same upsert_payment_catalog used by seed.py
+    and the /catalog/sync API, so it is idempotent and safe to re-run on boot."""
+    if not Config.AUTO_SEED:
+        return
+    db = SessionLocal()
+    try:
+        result = upsert_payment_catalog(
+            db,
+            operator_name=Config.SEED_OPERATOR_NAME,
+            stripe_account_id=Config.SEED_STRIPE_ACCOUNT_ID,
+            location_id=Config.SEED_LOCATION_ID,
+            address="1 Test St",
+            postal_code="00000",
+            city="Testville",
+            state="TS",
+            country="USA",
+            station_id=Config.SEED_STATION_ID,
+            tenant_id=Config.SEED_TENANT_ID,
+            ocpp_evse_id=Config.SEED_OCPP_EVSE_ID,
+            evse_id=Config.SEED_EVSE_ID,
+            currency=Config.SEED_CURRENCY,
+            authorization_amount=Config.SEED_AUTHORIZATION_AMOUNT,
+        )
+        db.commit()
+        info(
+            f" [AUTO_SEED] Seeded station_id={Config.SEED_STATION_ID} "
+            f"tenant_id={Config.SEED_TENANT_ID} (evse row id={result['evse_id']})."
+        )
+    except Exception as exc:  # noqa: BLE001 - never let a seed failure block boot
+        db.rollback()
+        error(f" [AUTO_SEED] failed: {exc}")
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 async def startup_event():
+    _auto_seed()
     loop = get_event_loop()
     # Hold a strong reference to the consumer task. asyncio only keeps a weak
     # reference to tasks, so a fire-and-forget create_task() can be garbage

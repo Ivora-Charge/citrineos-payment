@@ -51,6 +51,25 @@ class AppConfig:
     CITRINEOS_DIRECTUS_LOGIN_PASSWORD: str
     CITRINEOS_DIRECTUS_QR_CODE_FOLDER: str
     CLIENT_URL: str
+    # Shared secret for the service-to-service catalog sync API
+    # (api/endpoints/catalog.py). Empty => the write endpoints fail closed (503)
+    # so the catalog can never be mutated by an unauthenticated caller.
+    PAYMENT_CATALOG_SYNC_SECRET: str = ""
+
+    # Dev-only convenience: when AUTO_SEED=true the startup hook in main.py seeds
+    # one catalog chain from the SEED_* values below (same upsert as seed.py and
+    # the /catalog/sync API). Leave off in any shared/prod environment -- the
+    # operator-ui onboarding flow is the real path.
+    AUTO_SEED: bool = False
+    SEED_STATION_ID: str = "cp002"
+    SEED_TENANT_ID: str = "1"
+    SEED_OCPP_EVSE_ID: int = 1
+    SEED_EVSE_ID: str = "cp002-1"
+    SEED_LOCATION_ID: str = "loc-001"
+    SEED_OPERATOR_NAME: str = "Test Operator"
+    SEED_STRIPE_ACCOUNT_ID: str = "platform"
+    SEED_CURRENCY: str = "usd"
+    SEED_AUTHORIZATION_AMOUNT: float = 25.0
 
     """
     Map environment variables to class fields according to these rules:

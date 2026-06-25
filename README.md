@@ -145,6 +145,88 @@ To set up only the Python environment, run:
 ./deploy_local.sh
 ```
 
+## Catalog sync API
+
+Scan-and-charge and web checkout need an Operator → Location → Tariff → EVSE →
+Connector chain in the `payment_*` tables. Historically this was created by
+running [`seed.py`](#manual-catalog-seed) by hand. The catalog sync API lets a
+trusted backend (e.g. the operator-ui onboarding flow) create/update that chain
+over HTTP instead.
+
+Set a shared secret in `.env`:
+
+```
+PAYMENT_CATALOG_SYNC_SECRET="changeme-dev-secret"
+```
+
+If the secret is empty the write endpoints are disabled and return `503` — the
+catalog is never writable anonymously. Every call must send the secret in the
+`X-Catalog-Sync-Secret` header (wrong value → `401`).
+
+| Method | Path                       | Purpose                                              |
+| ------ | -------------------------- | ---------------------------------------------------- |
+| POST   | `/api/catalog/sync`        | Upsert one operator → location → tariff → evse → connector chain |
+| GET    | `/api/catalog/status`      | Whether a catalog row exists (`?evse_id=` or `?station_id=&tenant_id=`) |
+| POST   | `/api/catalog/sync-station`| Phase 3 stub — pull a station from the CitrineOS data API (`501`) |
+
+Sync is **idempotent**: rows are matched on their natural keys (`operator.name`,
+`location.location_id`, `evse.evse_id`, `connector.connector_id`) and updated in
+place, so re-syncing never creates duplicates. The EVSE business key follows the
+convention `evse_id = {station_id}-{ocpp_evse_id}` (e.g. `cp002-1`).
+
+Tariff and connector fields are optional and fall back to the seed defaults, so a
+minimal payload still produces a working row:
+
+```bash
+curl -X POST http://localhost:9010/api/catalog/sync \
+  -H "X-Catalog-Sync-Secret: changeme-dev-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "operator_name": "Test Operator",
+        "stripe_account_id": "platform",
+        "location_id": "loc-001",
+        "address": "1 Test St", "postal_code": "00000",
+        "city": "Testville", "state": "TS", "country": "USA",
+        "station_id": "cp002", "tenant_id": "1",
+        "ocpp_evse_id": 1, "evse_id": "cp002-1",
+        "currency": "usd", "price_kwh": 0.30, "authorization_amount": 25
+      }'
+
+# verify
+curl http://localhost:9010/api/evses/cp002-1
+```
+
+`stripe_account_id` may be a real Connect account (`acct_...`) or, in local dev,
+any non-`acct_` value (e.g. `"platform"`) to charge on the platform account — see
+`utils/utils.py:stripe_account_kwargs`.
+
+<a id="manual-catalog-seed"></a>
+The same logic is exposed as a CLI. `seed.py` is now a thin wrapper over
+`catalog/sync.py:upsert_payment_catalog`:
+
+```bash
+python seed.py --station-id cp002 --tenant-id 1 --stripe-account-id platform \
+               --currency usd --authorization-amount 25
+```
+
+### Dev auto-seed on startup
+
+For local development you can have the service seed one catalog chain on boot
+instead of running `seed.py` or calling the API. Set `AUTO_SEED=true` plus the
+`SEED_*` values (see [`.env.example`](.env.example)); the startup hook in
+`main.py` calls the same idempotent `upsert_payment_catalog`, so it is safe to
+re-run on every boot. Keep `AUTO_SEED=false` in any shared/prod environment —
+the operator-ui onboarding flow is the real path to populate the catalog there.
+
+```bash
+AUTO_SEED=true SEED_STATION_ID=cp002 SEED_TENANT_ID=1 \
+SEED_STRIPE_ACCOUNT_ID=platform <run the service>
+```
+
+> The catalog sync API, `seed.py`, and `AUTO_SEED` all share
+> `catalog/sync.py:upsert_payment_catalog`, so they stay in lockstep and are
+> mutually backward compatible.
+
 ## Tests
 
 To execute the tests, run the following command from the root directory:

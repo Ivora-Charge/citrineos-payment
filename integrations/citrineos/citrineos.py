@@ -468,15 +468,41 @@ class CitrineOSIntegration(OcppIntegration):
         db.refresh(db_checkout)
         return
 
+    def find_checkout_for_event(
+        self, db: Session, transaction_event: TransactionEventRequest
+    ) -> "CheckoutModel | None":
+        """Locate the Checkout a TransactionEvent belongs to.
+
+        CitrineOS only echoes transactionInfo.remoteStartId on the *Started*
+        event; Updated/Ended events carry remoteStartId=None. The Started handler
+        therefore records remote_request_transaction_id = transactionId, and we
+        match subsequent events by that transaction id. remoteStartId is still
+        tried first (and as a fallback) so both paths keep working.
+        """
+        tx_info = transaction_event.transactionInfo
+        db_checkout = None
+        if tx_info.remoteStartId is not None:
+            db_checkout = (
+                db.query(CheckoutModel)
+                .filter(CheckoutModel.id == tx_info.remoteStartId)
+                .first()
+            )
+        if db_checkout is None and tx_info.transactionId is not None:
+            db_checkout = (
+                db.query(CheckoutModel)
+                .filter(
+                    CheckoutModel.remote_request_transaction_id
+                    == tx_info.transactionId
+                )
+                .first()
+            )
+        return db_checkout
+
     async def process_transaction_updated(
         self, transaction_event: TransactionEventRequest
     ) -> None:
         db: Session = next(get_db())
-        db_checkout = (
-            db.query(CheckoutModel)
-            .filter(CheckoutModel.id == transaction_event.transactionInfo.remoteStartId)
-            .first()
-        )
+        db_checkout = self.find_checkout_for_event(db, transaction_event)
         if db_checkout is None:
             info(
                 " [CitrineOS] Checkout not found for transaction update event: %r",
@@ -496,11 +522,7 @@ class CitrineOSIntegration(OcppIntegration):
         self, transaction_event: TransactionEventRequest
     ) -> None:
         db: Session = next(get_db())
-        db_checkout = (
-            db.query(CheckoutModel)
-            .filter(CheckoutModel.id == transaction_event.transactionInfo.remoteStartId)
-            .first()
-        )
+        db_checkout = self.find_checkout_for_event(db, transaction_event)
         if db_checkout is None:
             info(
                 " [CitrineOS] Checkout not found for transaction end event: %r",
@@ -531,21 +553,23 @@ class CitrineOSIntegration(OcppIntegration):
                 len(transaction_event.meterValue) - 1
             ]
             for sampled_value in latest_meter_value.sampledValue:
+                # unitOfMeasure is optional in OCPP 2.0.1 (e.g. the simulator
+                # omits it on the Transaction.End sample). Default to the OCPP
+                # default unit (Wh) / no multiplier instead of crashing on None.
+                uom = sampled_value.unitOfMeasure
+                unit = uom.unit if uom is not None else None
+                multiplier = uom.multiplier if uom is not None else None
+
                 if (
                     sampled_value.measurand
                     == MeasurandEnumType.EnergyActiveImportRegister
                     and sampled_value.phase is None
                 ):
                     new_kwh_value = sampled_value.value
-                    if (
-                        sampled_value.unitOfMeasure.unit is None
-                        or sampled_value.unitOfMeasure.unit == "Wh"
-                    ):
+                    if unit is None or unit == "Wh":
                         new_kwh_value = new_kwh_value / 1000
-                    if sampled_value.unitOfMeasure.multiplier is not None:
-                        new_kwh_value = (
-                            new_kwh_value * 10**sampled_value.unitOfMeasure.multiplier
-                        )
+                    if multiplier is not None:
+                        new_kwh_value = new_kwh_value * 10**multiplier
                     if db_checkout.transaction_last_meter_reading is None:
                         db_checkout.transaction_kwh = 0
                     if db_checkout.transaction_last_meter_reading is not None:
@@ -559,15 +583,10 @@ class CitrineOSIntegration(OcppIntegration):
                     and sampled_value.phase is None
                 ):
                     new_power_value = sampled_value.value
-                    if (
-                        sampled_value.unitOfMeasure.unit is None
-                        or sampled_value.unitOfMeasure.unit == "W"
-                    ):
+                    if unit is None or unit == "W":
                         new_power_value = new_power_value / 1000
-                    if sampled_value.unitOfMeasure.multiplier is not None:
-                        new_power_value = (
-                            new_power_value * 10**sampled_value.unitOfMeasure.multiplier
-                        )
+                    if multiplier is not None:
+                        new_power_value = new_power_value * 10**multiplier
                     db_checkout.power_active_import = new_power_value
 
                 elif (
@@ -575,10 +594,8 @@ class CitrineOSIntegration(OcppIntegration):
                     and sampled_value.phase is None
                 ):
                     new_soc_value = sampled_value.value
-                    if sampled_value.unitOfMeasure.multiplier is not None:
-                        new_soc_value = (
-                            new_soc_value * 10**sampled_value.unitOfMeasure.multiplier
-                        )
+                    if multiplier is not None:
+                        new_soc_value = new_soc_value * 10**multiplier
                     db_checkout.transaction_soc = new_soc_value
         return db_checkout
 

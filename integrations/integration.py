@@ -1,5 +1,5 @@
 from io import BytesIO
-from logging import error, info
+from logging import error, info, warning
 from typing import List, Tuple
 from fastapi import FastAPI
 import requests
@@ -30,25 +30,47 @@ class OcppIntegration:
             )
             return
 
+        # Resolve the operator via the checkout's connector -> evse -> location ->
+        # operator chain. The previous query cross-joined Operator without linking
+        # Location.operator_id, so with more than one operator it returned an
+        # arbitrary (wrong) stripe_account_id.
         db_operator: Operator = (
             db.query(Operator)
-            .filter(
-                Connector.id == db_checkout.connector_id,
-            )
-            .filter(
-                Evse.id == Connector.evse_id,
-            )
-            .filter(
-                Location.id == Evse.location_id,
-            )
+            .join(Location, Location.operator_id == Operator.id)
+            .join(Evse, Evse.location_id == Location.id)
+            .join(Connector, Connector.evse_id == Evse.id)
+            .filter(Connector.id == db_checkout.connector_id)
             .first()
         )
+        if db_operator is None:
+            error(
+                f" [integrations] CAPTURE ERROR - Could not resolve operator for "
+                f"Checkout: {checkout_id}"
+            )
+            return
 
         pricing = generate_pricing(checkout_id=checkout_id)
 
+        # You can never capture more than was authorized (the manual-capture hold
+        # placed at checkout). If the session's gross cost exceeds the
+        # authorization, capture the full hold instead of letting Stripe reject
+        # the capture for exceeding the authorized amount.
+        amount_to_capture = pricing.total_costs_gross
+        if (
+            db_checkout.authorization_amount is not None
+            and amount_to_capture > db_checkout.authorization_amount
+        ):
+            warning(
+                f" [integrations] Checkout {db_checkout.id}: gross cost "
+                f"{amount_to_capture} exceeds authorized "
+                f"{db_checkout.authorization_amount}; capping capture at the "
+                f"authorized amount."
+            )
+            amount_to_capture = int(db_checkout.authorization_amount)
+
         suc_intent = stripe.PaymentIntent.capture(
             intent=db_checkout.payment_intent_id,
-            amount_to_capture=pricing.total_costs_gross,
+            amount_to_capture=amount_to_capture,
             **stripe_account_kwargs(db_operator.stripe_account_id),
         )
 

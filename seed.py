@@ -15,28 +15,8 @@ Usage:
 
 import argparse
 
-from db.init_db import (
-    SessionLocal,
-    Operator,
-    Location,
-    Tariff,
-    Evse,
-    Connector,
-)
-
-
-def get_or_create(db, model, defaults=None, **lookup):
-    obj = db.query(model).filter_by(**lookup).first()
-    if obj is None:
-        obj = model(**lookup, **(defaults or {}))
-        db.add(obj)
-        db.flush()  # assign PK without committing
-        created = True
-    else:
-        for k, v in (defaults or {}).items():
-            setattr(obj, k, v)
-        created = False
-    return obj, created
+from db.init_db import SessionLocal
+from catalog.sync import upsert_payment_catalog
 
 
 def main():
@@ -59,69 +39,34 @@ def main():
 
     db = SessionLocal()
     try:
-        operator, _ = get_or_create(
-            db, Operator,
-            name=args.operator_name,
-            defaults={"stripe_account_id": args.stripe_account_id},
-        )
-
-        location, _ = get_or_create(
-            db, Location,
+        # Delegate to the shared upsert used by the catalog sync API so the CLI
+        # and the HTTP endpoint stay in lockstep. The address fields keep the
+        # historical seed values; tariff price/fee fields use the module
+        # defaults. stripe_price_id is left NULL on purpose -- the handler
+        # lazily creates the Stripe Price on first use and writes the id back.
+        result = upsert_payment_catalog(
+            db,
+            operator_name=args.operator_name,
+            stripe_account_id=args.stripe_account_id,
             location_id=args.location_id,
-            defaults={
-                "operator_id": operator.id,
-                "address": "1 Test St",
-                "postal_code": "00000",
-                "city": "Testville",
-                "state": "TS",
-                "country": "USA",
-            },
-        )
-
-        # Tariff: only the NOT NULL columns are required here. stripe_price_id is
-        # left NULL on purpose -- the handler lazily creates the Stripe Price on
-        # first use (citrineos.py:303-313) and writes the id back.
-        tariff, _ = get_or_create(
-            db, Tariff,
-            currency=args.currency,
-            tax_rate=0.0,
-            defaults={
-                "price_kwh": 0.30,
-                "price_minute": 0.0,
-                "price_session": 0.0,
-                "authorization_amount": args.authorization_amount,
-                "payment_fee": 0.0,
-            },
-        )
-
-        evse, _ = get_or_create(
-            db, Evse,
+            address="1 Test St",
+            postal_code="00000",
+            city="Testville",
+            state="TS",
+            country="USA",
+            station_id=args.station_id,
+            tenant_id=args.tenant_id,
+            ocpp_evse_id=args.ocpp_evse_id,
             evse_id=args.evse_id,
-            defaults={
-                "ocpp_evse_id": args.ocpp_evse_id,
-                "status": "Available",
-                "station_id": args.station_id,
-                "tenant_id": args.tenant_id,
-                "location_id": location.id,
-            },
-        )
-
-        get_or_create(
-            db, Connector,
-            connector_id=f"{args.evse_id}-1",
-            defaults={
-                "power_type": "AC_1_PHASE",
-                "max_voltage": 240,
-                "max_amperage": 32,
-                "evse_id": evse.id,
-                "tariff_id": tariff.id,
-            },
+            currency=args.currency,
+            authorization_amount=args.authorization_amount,
         )
 
         db.commit()
         print(f"Seeded station_id={args.station_id} tenant_id={args.tenant_id} "
-              f"(operator={operator.id}, location={location.id}, "
-              f"tariff={tariff.id}, evse={evse.id}).")
+              f"(operator={result['operator_id']}, "
+              f"location={result['location_id']}, "
+              f"tariff={result['tariff_id']}, evse={result['evse_id']}).")
     except Exception:
         db.rollback()
         raise
