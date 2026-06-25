@@ -19,6 +19,7 @@
   "checkout.accept.terms.prefix": "Hiermit akzeptiere ich die",
   "checkout.accept.terms.linktext": "Nutzungsbedinungen",
   "checkout.button.checkout": "Bezahlen",
+  "checkout.button.paynow": "Jetzt bezahlen",
   "checkout.error.tanotaccepted": "Du musst die Nutzungsbedinungen akzeptieren!",
 
   "charging.speed": "Lädt",

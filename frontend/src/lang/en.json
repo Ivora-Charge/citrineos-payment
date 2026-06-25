@@ -19,6 +19,7 @@
   "checkout.accept.terms.prefix": "I hereby accept the",
   "checkout.accept.terms.linktext": "terms and conditions",
   "checkout.button.checkout": "Checkout",
+  "checkout.button.paynow": "Pay now",
   "checkout.error.tanotaccepted": "You need to accept the T&A!",
 
   "charging.speed": "Charging",

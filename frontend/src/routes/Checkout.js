@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useIntl } from 'react-intl';
 import { Button, Card, Checkbox } from 'antd-mobile';
 import { Modal, Skeleton } from 'antd';
@@ -40,6 +40,13 @@ export default function Checkout() {
   const navigate = useNavigate();
   const intl = useIntl();
   const { evseId } = useParams();
+  // Scan & Charge: the QR on the charger points here with the already-created
+  // Stripe payment link in the `pay` param, so the driver sees charger/tariff
+  // details and taps "Pay now" to go to Stripe (instead of the QR opening Stripe
+  // directly). When absent, this is the normal web-portal flow that creates a
+  // checkout session on demand.
+  const [searchParams] = useSearchParams();
+  const payNowUrl = searchParams.get('pay');
 
   React.useEffect(() => {
     const setLocationData = (location) => {
@@ -99,6 +106,15 @@ export default function Checkout() {
         errMsg: intl.formatMessage({ id: 'checkout.error.tanotaccepted' }),
       });
       return false;
+    }
+
+    // Scan & Charge: a payment link already exists for this (already-started)
+    // session — send the driver straight to it instead of creating a new
+    // checkout session (which would start a second transaction).
+    if (payNowUrl) {
+      setState({ ...state, loading: true });
+      window.location.href = payNowUrl;
+      return true;
     }
 
     // TA accpeted, process checkout
@@ -286,7 +302,9 @@ export default function Checkout() {
             loading={state.loading}
           >
             <i className="ri-flashlight-line"></i>{' '}
-            {intl.formatMessage({ id: 'checkout.button.checkout' })}
+            {payNowUrl
+              ? intl.formatMessage({ id: 'checkout.button.paynow' })
+              : intl.formatMessage({ id: 'checkout.button.checkout' })}
           </Button>
 
           {state.errMsg && <div style={{ color: 'red' }}>{state.errMsg}</div>}

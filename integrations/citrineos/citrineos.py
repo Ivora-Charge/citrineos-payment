@@ -1,6 +1,7 @@
 from enum import Enum
 from io import BytesIO
 import json
+from urllib.parse import quote
 from typing import List, Tuple
 import asyncio
 from aio_pika import connect_robust
@@ -355,7 +356,15 @@ class CitrineOSIntegration(OcppIntegration):
             checkoutId=db_checkout.id,
         )
 
-        qr_code_img = qrcode.make(payment_link_url)
+        # Point the QR at the PayServe charger-info page (carrying the Stripe
+        # payment link in the `pay` query param) instead of straight at Stripe,
+        # so the driver sees charger/tariff details and taps "Pay now" before
+        # being sent to the Stripe checkout.
+        checkout_page_url = (
+            f"{Config.CLIENT_URL}/checkout/{evse.evse_id}"
+            f"?pay={quote(payment_link_url, safe='')}"
+        )
+        qr_code_img = qrcode.make(checkout_page_url)
         # Save the image to an in-memory buffer
         buffer = BytesIO()
         debug(type(qr_code_img))
