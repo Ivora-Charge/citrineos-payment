@@ -68,42 +68,36 @@ export default function Home() {
 
   return (
     <div className="page-container page-container-home">
-      <h1>
-        SCAN<span style={{ marginLeft: '30px' }}> </span>PAY
-      </h1>
-      <h1>CHARGE</h1>
-      <div className="div-with-margin text-align-center">
+      <h1>{intl.formatMessage({ id: 'home.headline' })}</h1>
+      <div className="home-hero-sub">
         {intl.formatMessage({ id: 'home.subheading' })}
       </div>
-      <div className="div-with-margin width-100">
-        <PaymentOptions />
-      </div>
-      <div className="div-with-margin text-align-center">
-        {intl.formatMessage({ id: 'home.instructions' })}
-      </div>
-      <Form
-        name="openinghours"
-        onFinish={onFinish}
-        form={form}
-        className="width-100"
-        labelCol={{ span: 0 }}
-        wrapperCol={{ span: 24 }}
-      >
-        <div className="div-with-margin width-100">
+
+      <div className="home-card">
+        <Form
+          name="openinghours"
+          onFinish={onFinish}
+          form={form}
+          className="width-100"
+          labelCol={{ span: 0 }}
+          wrapperCol={{ span: 24 }}
+        >
           <Form.Item name="evseId" label="EVSE ID" rules={[{ required: true }]}>
             <Input
               style={{ width: '100%' }}
               size="large"
-              placeholder="DE*CPO*E1234567"
+              placeholder="Charger ID, e.g. cp001-1"
             />
           </Form.Item>
-        </div>
-        <div className="div-with-margin text-align-center">
-          <Button type="submit">
+          <Button type="submit" block>
             {intl.formatMessage({ id: 'global.continue' })}
           </Button>
+        </Form>
+
+        <div className="pay-options on-dark" style={{ marginBottom: 0 }}>
+          <PaymentOptions />
         </div>
-      </Form>
+      </div>
     </div>
   );
 }

@@ -162,11 +162,15 @@ export default function Charging() {
       </div>
 
       {/* Charging Speed */}
-      <div
-        className="width-100 text-align-center"
-        style={{ marginTop: '40px', marginBottom: '40px' }}
-      >
-        <div style={{ fontSize: '24px', fontWeight: '900' }}>
+      <div className="charge-status">
+        <div
+          className={
+            'charge-status__ring' +
+            (state.status === 'rejected' || state.status === 'error'
+              ? ' is-error'
+              : '')
+          }
+        >
           {/* Icon depending on state */}
           {state.status === 'waiting' ? (
             <i className="ri-lock-unlock-fill"></i>
@@ -181,7 +185,7 @@ export default function Charging() {
           )}
         </div>
 
-        <div style={{ fontSize: '24px', fontWeight: '900' }}>
+        <div className="charge-status__headline">
           {/* Caption depending on state */}
           {state.status === 'waiting'
             ? intl.formatMessage({ id: 'charging.authorized.waiting' })
@@ -198,7 +202,7 @@ export default function Charging() {
         {/* Charging Speed END */}
 
         {/* Last update timestamp */}
-        <div style={{ fontSize: '16px' }}>
+        <div className="charge-status__sub">
           <i className="ri-refresh-fill"></i>{' '}
           {intl.formatMessage({ id: 'charging.lastupdate' })}: {state.timestamp}
         </div>
@@ -224,7 +228,7 @@ export default function Charging() {
             </div>
             <div>
               <span>
-                {(state.pricing?.total_costs_gross / 100).toFixed(2)}{' '}
+                {((state.pricing?.total_costs_gross ?? 0) / 100).toFixed(2)}{' '}
               </span>
               <span>{state.pricing?.currency}</span>
             </div>

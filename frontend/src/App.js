@@ -9,6 +9,7 @@ import Home from './routes/Home';
 import Checkout from './routes/Checkout';
 import Charging from './routes/Charging';
 import Receipt from './routes/Receipt';
+import Logo from './components/Logo';
 
 export default function App() {
   const pathname = useLocation().pathname;
@@ -36,8 +37,13 @@ export default function App() {
     >
       <div
         className="ampay-container"
-        style={pathname.startsWith('/receipt') ? { alignItems: 'unset' } : {}}
+        style={pathname.startsWith('/receipt') ? { alignItems: 'unset', padding: 0, maxWidth: 'unset' } : {}}
       >
+        {!pathname.startsWith('/receipt') && (
+          <header className="ivora-header">
+            <Logo size={34} />
+          </header>
+        )}
         <Routes>
           <Route path="/" exact={true} element={<Home />} />
           <Route path="/checkout/:evseId" exact={true} element={<Checkout />} />
@@ -53,6 +59,9 @@ export default function App() {
           />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
+        {!pathname.startsWith('/receipt') && (
+          <footer className="ivora-footer">ivoracharge.com</footer>
+        )}
       </div>
     </IntlProvider>
   );

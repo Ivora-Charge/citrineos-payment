@@ -1,10 +1,9 @@
 import React from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useIntl } from 'react-intl';
-import { Button, Card, Checkbox } from 'antd-mobile';
+import { Button, Checkbox } from 'antd-mobile';
 import { Modal, Skeleton } from 'antd';
 
-import PaymentCardImg from '../assets/images/Payment_page_card.png';
 import PaymentOptions from '../components/PaymentOptions.js';
 
 import axios from '../util/Api.js';
@@ -151,186 +150,143 @@ export default function Checkout() {
     return price.toFixed(2);
   };
 
+  // currency comes back lower-cased (e.g. "usd"); the symbol map is keyed
+  // upper-case. Fall back to the raw code so we never show a bare number.
+  const cur =
+    currencies[state.tariff_data?.currency?.toUpperCase()] ||
+    (state.tariff_data?.currency
+      ? `${state.tariff_data.currency.toUpperCase()} `
+      : '');
+
   return (
-    <div className="page-container" style={{ height: '100%' }}>
-      <div style={{ padding: '5px', width: '100%' }}>
+    <div className="page-container">
+      <div className="charger-card">
         <Skeleton active loading={state.initializing}>
-          {/* Top row */}
-          <div className="checkout-top-container">
-            <div>{evseId}</div>
-            <div>|</div>
-            <div>{state.power_type}</div>
-            <div>|</div>
-            <div>
-              max.{' '}
-              {getConnectorPowerKw(
-                state.max_voltage,
-                state.max_amperage,
-                state.power_type,
-              )}{' '}
-              kW
-            </div>
-          </div>
-          <div
-            className="checkout-top-container"
-            style={{ fontSize: '16px', fontWeight: 'bold' }}
-          >
-            {state.status}
-          </div>
+          <h1 className="charger-card__title">
+            {state.operator || 'This charging point'}
+          </h1>
 
-          {/* Location, Operator and Tariff info row */}
-          <div className="checkout-detail-wrapper">
-            <div className="checkout-detail-icon">
-              <i className="ri-map-pin-line"></i>
-            </div>
-            <div>
-              <b>Location:</b> {state.address}, {state.postalCode} {state.city},{' '}
-              {state.state} {state.country}
-            </div>
-          </div>
-          <div className="checkout-detail-wrapper">
-            <div className="checkout-detail-icon">
-              <i className="ri-charging-pile-line"></i>
-            </div>
-            <div>
-              <b>{intl.formatMessage({ id: 'checkout.operator' })}:</b>{' '}
-              {state.operator}
-            </div>
-          </div>
-          <div className="checkout-detail-wrapper">
-            <div className="checkout-detail-icon">
-              <i className="ri-price-tag-3-line"></i>
-            </div>
-            <div>
-              <b>{intl.formatMessage({ id: 'checkout.tariffinfo' })}:</b>
-            </div>
-          </div>
-
-          {state.tariff_data?.price_kwh > 0 && (
-            <div className="checkout-detail-wrapper">
-              <div className="checkout-detail-icon"></div>
-              <div className="checkout-pricing-line-wrapper">
-                <div>{intl.formatMessage({ id: 'checkout.pricekwh' })}</div>
-                <div>
-                  {get_price(state.tariff_data?.price_kwh)}{' '}
-                  {currencies[state.tariff_data?.currency]} (
-                  {intl.formatMessage({ id: 'checkout.inclvat' })})
-                </div>
-              </div>
-            </div>
-          )}
-          {state.tariff_data?.price_min > 0 && (
-            <div className="checkout-detail-wrapper">
-              <div className="checkout-detail-icon"></div>
-              <div className="checkout-pricing-line-wrapper">
-                <div>{intl.formatMessage({ id: 'checkout.pricemin' })}</div>
-                <div>
-                  {get_price(state.tariff_data?.price_min)}{' '}
-                  {currencies[state.tariff_data?.currency]} (
-                  {intl.formatMessage({ id: 'checkout.inclvat' })})
-                </div>
-              </div>
-            </div>
-          )}
-          {state.tariff_data?.price_session > 0 && (
-            <div className="checkout-detail-wrapper">
-              <div className="checkout-detail-icon"></div>
-              <div className="checkout-pricing-line-wrapper">
-                <div>{intl.formatMessage({ id: 'checkout.pricesession' })}</div>
-                <div>
-                  {get_price(state.tariff_data?.price_session)}{' '}
-                  {currencies[state.tariff_data?.currency]} (
-                  {intl.formatMessage({ id: 'checkout.inclvat' })})
-                </div>
-              </div>
+          {state.address && (
+            <div className="charger-place">
+              <i className="ri-map-pin-line" />
+              <span>
+                {state.address}, {state.postalCode} {state.city}
+                {state.state ? `, ${state.state}` : ''}
+              </span>
             </div>
           )}
 
-          <div
-            className="checkout-detail-wrapper"
-            style={{ marginTop: '20px' }}
-          >
-            <div className="checkout-detail-icon"></div>
-            <div className="checkout-pricing-line-wrapper">
-              <div style={{ fontSize: '10px' }}>
-                {intl.formatMessage(
-                  { id: 'checkout.authinfo' },
-                  {
-                    authorzation_amount: (
-                      <b>
-                        {state.tariff_data?.authorization_amount}{' '}
-                        {currencies[state.tariff_data?.currency]}
-                      </b>
-                    ),
-                  },
-                )}
-              </div>
-            </div>
+          <div className="charger-ref">
+            {evseId} · max{' '}
+            {getConnectorPowerKw(
+              state.max_voltage,
+              state.max_amperage,
+              state.power_type,
+            )}{' '}
+            kW
+            {state.status && state.status !== 'UNKNOWN' && (
+              <>
+                {' · '}
+                <span className={state.status === 'Available' ? 'avail' : undefined}>
+                  {state.status}
+                </span>
+              </>
+            )}
           </div>
 
-          <div
-            className="div-with-margin width-100"
-            style={{ padding: '0 30px 0 30px' }}
-          >
+          <div className="card-divider" />
+
+          <div className="rate">
+            {state.tariff_data?.price_kwh > 0 && (
+              <div className="rate__main">
+                <span className="rate__amt">
+                  {cur}
+                  {get_price(state.tariff_data?.price_kwh)}
+                </span>
+                <span className="rate__unit">
+                  / {intl.formatMessage({ id: 'checkout.pricekwh' })}
+                </span>
+                <span className="rate__vat">
+                  · {intl.formatMessage({ id: 'checkout.inclvat' })}
+                </span>
+              </div>
+            )}
+            {state.tariff_data?.price_min > 0 && (
+              <div className="rate__row">
+                {cur}
+                {get_price(state.tariff_data?.price_min)} /{' '}
+                {intl.formatMessage({ id: 'checkout.pricemin' })}
+              </div>
+            )}
+            {state.tariff_data?.price_session > 0 && (
+              <div className="rate__row">
+                {cur}
+                {get_price(state.tariff_data?.price_session)} /{' '}
+                {intl.formatMessage({ id: 'checkout.pricesession' })}
+              </div>
+            )}
+          </div>
+
+          <div className="auth-note">
+            {intl.formatMessage(
+              { id: 'checkout.authinfo' },
+              {
+                authorzation_amount: (
+                  <b>
+                    {cur}
+                    {state.tariff_data?.authorization_amount}
+                  </b>
+                ),
+              },
+            )}
+          </div>
+
+          <div className="pay-options">
             <PaymentOptions />
           </div>
-        </Skeleton>
-      </div>
-
-      {/* Card with Checkout Button */}
-      <Card className="checkout-card">
-        <Skeleton active loading={state.initializing}>
-          <div style={{ display: 'flex' }}>
-            <i
-              className="ri-information-line"
-              style={{ width: '40px', paddingLeft: '15px', color: '#1677ff' }}
-            ></i>
-            <div style={{ width: '96%', paddingRight: '15px' }}>
-              {intl.formatMessage({ id: 'checkout.connect.vehicle' })}
-            </div>
-          </div>
-
-          <img
-            src={PaymentCardImg}
-            style={{ width: '85vw', maxWidth: '380px', marginTop: '10px' }}
-          />
 
           <Button
-            style={{ marginTop: '-20px' }}
+            className="cta-button"
             color="primary"
+            block
             onClick={onCheckout}
             loading={state.loading}
           >
-            <i className="ri-flashlight-line"></i>{' '}
+            <i className="ri-flashlight-line" />{' '}
             {payNowUrl
               ? intl.formatMessage({ id: 'checkout.button.paynow' })
               : intl.formatMessage({ id: 'checkout.button.checkout' })}
           </Button>
 
-          {state.errMsg && <div style={{ color: 'red' }}>{state.errMsg}</div>}
+          {state.errMsg && <div className="checkout-error">{state.errMsg}</div>}
 
-          <Checkbox
-            style={{ marginTop: '10px' }}
-            value={state.taChecked}
-            onChange={(val) => {
-              setState({ ...state, taChecked: val, errMsg: null });
-            }}
-          >
-            <div style={{ fontSize: '13px' }}>
-              {intl.formatMessage({ id: 'checkout.accept.terms.prefix' })}&nbsp;
-              <a
-                href="#"
-                onClick={() => {
-                  setState({ ...state, modalVisible: true });
-                }}
-              >
-                {intl.formatMessage({ id: 'checkout.accept.terms.linktext' })}
-              </a>
-              .
-            </div>
-          </Checkbox>
+          <div className="terms-line">
+            <Checkbox
+              value={state.taChecked}
+              onChange={(val) => {
+                setState({ ...state, taChecked: val, errMsg: null });
+              }}
+            >
+              <span style={{ fontSize: '12.5px', color: 'var(--ink-soft)' }}>
+                {intl.formatMessage({ id: 'checkout.accept.terms.prefix' })}{' '}
+                <a
+                  href="#"
+                  onClick={() => {
+                    setState({ ...state, modalVisible: true });
+                  }}
+                >
+                  {intl.formatMessage({ id: 'checkout.accept.terms.linktext' })}
+                </a>
+              </span>
+            </Checkbox>
+          </div>
+
+          <div className="secured-line">
+            <i className="ri-lock-2-line" />
+            {intl.formatMessage({ id: 'checkout.securedbystripe' })}
+          </div>
         </Skeleton>
-      </Card>
+      </div>
 
       <Modal
         visible={state.modalVisible}

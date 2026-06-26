@@ -1,17 +1,30 @@
-:root {
-  --ampay-blue: #002447;
-  --receipt-borders: #bfbfbf;
-}
+/* ==========================================================================
+   Ivora Charge — PayServe theme
+   Brand system: Midnight / Ivory / Ivora Green / Tusk Bronze / Stone · Inter
+   ========================================================================== */
 
-@font-face {
-  font-family: 'montserrat';
-  src:
-    url('../assets/fonts/montserrat/montserrat-v15-latin-regular.woff')
-      format('woff'),
-    url('../assets/fonts/montserrat/montserrat-v15-latin-regular.woff2')
-      format('woff2');
-  font-weight: 400;
-  font-style: normal;
+:root {
+  --midnight: #0e1012;
+  --midnight-2: #16191c;
+  --midnight-3: #1f2327;
+  --ivory: #f0ede6;
+  --ivory-2: #e7e3d9;
+  --green: #5c9e6a;
+  --green-bright: #6cb27b;
+  --green-deep: #4d8a5a;
+  --bronze: #a8875a;
+  --stone: #a8a29e;
+  --ink: #14171a; /* text on ivory */
+  --ink-soft: #565b60;
+  --line: rgba(255, 255, 255, 0.1);
+  --line-ivory: rgba(20, 23, 26, 0.1);
+  --radius: 24px;
+  --radius-sm: 14px;
+  --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+
+  /* legacy vars still referenced by receipt */
+  --ampay-blue: var(--midnight);
+  --receipt-borders: #d8d4ca;
 }
 
 html,
@@ -20,25 +33,120 @@ body {
   height: 100%;
 }
 body {
-  /*background: linear-gradient(115deg, #002447 30%, #1A6AB8 80%);*/
-  font-family: montserrat !important;
+  margin: 0;
+  background-color: var(--midnight);
+  color: var(--ivory);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    sans-serif !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 #root {
   display: flex;
-  align-items: center;
+  min-height: 100%;
   justify-content: center;
-  height: 100%;
 }
 
+/* App shell ---------------------------------------------------------------- */
 .ampay-container {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 480px;
+  min-height: 100vh;
+  padding: 22px 18px 28px;
+  box-sizing: border-box;
+}
+/* subtle green aura behind everything */
+.ampay-container::before {
+  content: '';
+  position: fixed;
+  top: -240px;
+  left: 50%;
+  width: 640px;
+  height: 480px;
+  transform: translateX(-50%);
+  background: radial-gradient(
+    ellipse at center,
+    rgba(92, 158, 106, 0.1) 0%,
+    rgba(92, 158, 106, 0) 70%
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+.ampay-container > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Brand header / footer ---------------------------------------------------- */
+.ivora-header {
+  width: 100%;
   display: flex;
   align-items: center;
-  justify-content: center;
-  height: 100%;
-  flex-grow: 1;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.ivora-footer {
+  width: 100%;
+  margin-top: auto;
+  padding-top: 28px;
+  text-align: center;
+  color: rgba(168, 162, 158, 0.5);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
 }
 
+.ivora-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ivora-logo__badge {
+  border-radius: 11px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  display: block;
+}
+.ivora-logo__wm {
+  font-weight: 800;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  color: var(--ivory);
+  line-height: 1;
+}
+.ivora-logo__wm span {
+  color: var(--stone);
+  font-weight: 600;
+  margin-left: 5px;
+}
+.ivora-header__tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--green);
+}
+
+/* Reusable bits ------------------------------------------------------------ */
+.eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--green);
+  margin-bottom: 8px;
+}
+.accent-rule {
+  width: 56px;
+  height: 4px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--green), var(--bronze));
+  margin: 14px 0;
+}
 .div-with-margin {
   margin-top: 10px;
   margin-bottom: 10px;
@@ -55,111 +163,456 @@ body {
   flex-direction: column;
   align-items: center;
   width: 100%;
-  color: white;
+  color: var(--ivory);
 }
 
+/* ===== Home ============================================================== */
 .page-container-home {
-  padding: 50px;
-  margin-top: -50px;
+  padding: 8px 6px 0;
+  text-align: center;
 }
 .page-container-home h1 {
-  font-weight: bold;
-  margin: 0;
-  color: white !important;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-size: 40px;
+  line-height: 1.04;
+  margin: 2px 0;
+  color: var(--ivory) !important;
+}
+.home-hero-sub {
+  color: var(--stone);
+  font-size: 14px;
+  margin: 14px 0 22px;
+}
+.home-card {
+  width: 100%;
+  background: var(--midnight-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px 20px;
+  box-sizing: border-box;
+  box-shadow: var(--shadow);
 }
 
+/* ===== Charger info card (Checkout) ===================================== */
+.charger-card {
+  width: 100%;
+  background: var(--ivory);
+  color: var(--ink);
+  border-radius: var(--radius);
+  padding: 24px 22px 20px;
+  box-sizing: border-box;
+  box-shadow: var(--shadow);
+}
+.charger-card__title {
+  font-size: 25px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 0;
+  line-height: 1.15;
+  word-break: break-word;
+}
+/* the real place + a quiet machine reference — feels like somewhere, not a row */
+.charger-place {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 8px;
+  color: var(--ink-soft);
+  font-size: 14.5px;
+  line-height: 1.4;
+}
+.charger-place i {
+  color: var(--green-deep);
+  font-size: 17px;
+  position: relative;
+  top: 1px;
+}
+.charger-ref {
+  margin-top: 10px;
+  color: var(--stone);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.charger-ref .avail {
+  color: var(--green-deep);
+}
+.pay-heading {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+/* the rate, stated plainly — the price is the focal point, no labels/heading */
+.rate {
+  margin: 2px 0 2px;
+}
+.rate__main {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.rate__amt {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.rate__unit {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.rate__vat {
+  font-size: 13px;
+  color: var(--stone);
+}
+.rate__row {
+  font-size: 14.5px;
+  color: var(--ink-soft);
+  margin-top: 6px;
+}
+.secured-line {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 16px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.secured-line i {
+  color: var(--green-deep);
+}
+.charger-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+.charger-meta .dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--stone);
+}
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(92, 158, 106, 0.16);
+  color: var(--green-deep);
+}
+.status-pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.card-divider {
+  height: 1px;
+  background: var(--line-ivory);
+  margin: 18px 0;
+}
+
+.detail-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 12px 0;
+}
+.detail-row .detail-ic {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: rgba(92, 158, 106, 0.12);
+  color: var(--green-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+}
+.detail-row .detail-body {
+  flex: 1;
+  min-width: 0;
+}
+.detail-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--stone);
+}
+.detail-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-top: 2px;
+}
+
+/* tariff / price rows */
+.price-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 9px 0;
+  font-size: 14px;
+}
+.price-row .price-k {
+  color: var(--ink-soft);
+}
+.price-row .price-v {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.auth-note {
+  background: rgba(168, 135, 90, 0.1);
+  border: 1px solid rgba(168, 135, 90, 0.28);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #6e5733;
+  margin-top: 18px;
+}
+.auth-note b {
+  color: var(--ink);
+}
+
+/* payment method glyphs */
+.pay-options {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  color: var(--ink-soft);
+  margin: 18px 0 6px;
+}
+.pay-options.on-dark {
+  color: var(--stone);
+}
+
+/* terms */
+.terms-line {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  margin-top: 14px;
+  text-align: center;
+}
+.terms-line a {
+  color: var(--green-deep);
+  font-weight: 700;
+  text-decoration: none;
+}
+.checkout-error {
+  color: #c0492b;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  margin-top: 12px;
+}
+
+/* legacy classes kept working (older Checkout markup) --------------------- */
 .checkout-top-container {
   width: 100%;
   display: flex;
-  justify-content: space-evenly;
-  margin-bottom: 5%;
-  font-weight: bold;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  font-weight: 600;
+  color: var(--stone);
+  font-size: 14px;
 }
 .checkout-detail-wrapper {
   display: flex;
-  width: 96%;
+  width: 100%;
+  gap: 10px;
+  margin: 8px 0;
 }
 .checkout-detail-icon {
-  width: 40px;
-  padding-left: 15px;
+  width: 30px;
+  color: var(--green);
 }
 .checkout-pricing-line-wrapper {
   display: flex;
   justify-content: space-between;
   width: 100%;
 }
-
 .checkout-card {
   width: 100%;
-  margin-top: 10px;
-  color: #333333;
-  flex-grow: 1;
-  border-bottom-right-radius: 0 !important;
-  border-bottom-left-radius: 0 !important;
-}
-.checkout-card .adm-card-body {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
+  margin-top: 16px;
+  color: var(--ink);
 }
 
+/* ===== Charging status =================================================== */
+.charge-status {
+  width: 100%;
+  text-align: center;
+  margin: 8px 0 22px;
+}
+.charge-status__ring {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  margin: 4px auto 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 40px;
+  color: var(--green);
+  background: rgba(92, 158, 106, 0.12);
+  border: 1px solid rgba(92, 158, 106, 0.35);
+}
+.charge-status__ring.is-error {
+  color: var(--bronze);
+  background: rgba(168, 135, 90, 0.12);
+  border-color: rgba(168, 135, 90, 0.4);
+}
+.charge-status__headline {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--ivory);
+}
+.charge-status__sub {
+  font-size: 13px;
+  color: var(--stone);
+  margin-top: 6px;
+}
 .charging-info-block {
   display: flex;
   justify-content: space-between;
-  border-top: 1px solid rgba(255, 255, 255, 0.5);
-  padding: 20px 0 0 0;
+  align-items: center;
+  width: 100%;
+  border-top: 1px solid var(--line);
+  padding: 16px 2px;
+  font-size: 15px;
+  color: var(--ivory);
+}
+.charging-info-block > div:first-child {
+  color: var(--stone);
+}
+.charging-info-block > div:last-child {
+  font-weight: 700;
 }
 .charging-incl-vat {
-  font-size: 16px;
+  font-size: 15px;
 }
 
+/* ===== Buttons (antd-mobile / antd) ====================================== */
 .adm-button {
-  border-radius: 20px !important;
+  border-radius: var(--radius-sm) !important;
+  font-weight: 700 !important;
+  font-size: 16px !important;
+  min-height: 50px !important;
+  border: none !important;
+}
+/* primary CTA */
+.adm-button.adm-button-primary,
+button[type='submit'].adm-button {
+  background: var(--green) !important;
+  color: #fff !important;
+  box-shadow: 0 12px 26px rgba(92, 158, 106, 0.35) !important;
+}
+.adm-button.adm-button-primary:active,
+button[type='submit'].adm-button:active {
+  background: var(--green-deep) !important;
+}
+/* default (non-primary) buttons: subtle on dark */
+.adm-button:not(.adm-button-primary):not([type='submit']) {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: var(--ivory) !important;
+  border: 1px solid var(--line) !important;
+}
+.cta-button {
+  width: 100%;
+  margin-top: 18px !important;
+}
+
+/* antd input (Home EVSE id) */
+.ant-input,
+.ant-input-affix-wrapper {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid var(--line) !important;
+  color: var(--ivory) !important;
+  border-radius: var(--radius-sm) !important;
+  height: 50px !important;
+  font-size: 16px !important;
+}
+.ant-input::placeholder {
+  color: rgba(168, 162, 158, 0.6) !important;
+}
+.ant-form-item-explain-error {
+  color: #e08a6e !important;
+  font-size: 13px;
+  margin-top: 6px;
 }
 .ant-col-0 {
   display: none !important;
-} /* fixing issue */
+}
 
+/* antd-mobile checkbox accent */
+.adm-checkbox.adm-checkbox-checked .adm-checkbox-icon {
+  background: var(--green) !important;
+  border-color: var(--green) !important;
+}
+
+/* ===== Receipt (document) =============================================== */
 .receipt-main-container {
-  width: 100vw;
-  background-color: rgb(217, 217, 217);
+  width: 100%;
+  background: var(--ivory);
   display: flex;
   justify-content: center;
-  align-items: center;
+  align-items: flex-start;
+  min-height: 100vh;
 }
-
 .receipt-inner-container {
   max-width: 720px;
+  width: 100%;
 }
-
 .receipt-header-row {
   display: flex;
-  background-color: var(--ampay-blue);
-  color: white;
+  background: var(--midnight);
+  color: var(--ivory);
   justify-content: space-between;
-  padding: 10px;
+  padding: 16px;
   font-size: 20px;
-  font-weight: bold;
+  font-weight: 800;
 }
 .receipt-header-row-subtitle {
   padding-right: 30px;
+  color: var(--stone);
 }
-
 .receipt-content-container {
   border: 1px solid var(--receipt-borders);
-  background-color: white;
-  padding: 10px;
+  background: #fff;
+  padding: 14px;
   font-size: 14px;
+  color: var(--ink);
 }
 .receipt-content-container table {
   width: 100%;
+  border-collapse: collapse;
 }
 .receipt-content-container td {
   border: 1px solid var(--receipt-borders);
-  padding: 5px;
-}
-.receipt-content-container td {
+  padding: 7px;
   text-align: right;
 }
 .receipt-content-container td:nth-child(1) {
@@ -167,17 +620,14 @@ body {
 }
 .receipt-content-container thead,
 .receipt-content-container tfoot tr:nth-child(1),
-.receipt-content-container thead,
 .receipt-content-container tfoot tr:nth-child(3),
-.receipt-content-container thead,
 .receipt-content-container tfoot tr:nth-child(5) {
-  font-weight: bold;
+  font-weight: 700;
 }
-
 .receipt-footer-row {
-  background-color: var(--ampay-blue);
-  color: white;
-  padding: 10px;
-  font-size: 14px;
-  font-weight: bold;
+  background: var(--midnight);
+  color: var(--stone);
+  padding: 14px 16px;
+  font-size: 13px;
+  font-weight: 600;
 }
