@@ -26,7 +26,7 @@
   "checkout.error.tanotaccepted": "You need to accept the T&A!",
 
   "charging.speed": "Charging",
-  "charging.authorized.waiting": "Authorized, waiting for charger to start",
+  "charging.authorized.waiting": "Payment confirmed — plug in to start charging",
   "charging.rejected": "Session start rejected by charger",
   "charging.finished": "Session finished",
   "charging.lastupdate": "Last update",

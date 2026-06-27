@@ -26,7 +26,7 @@
   "checkout.error.tanotaccepted": "Du musst die Nutzungsbedinungen akzeptieren!",
 
   "charging.speed": "Lädt",
-  "charging.authorized.waiting": "Authorisiert, warte auf Start des Ladevorgangs",
+  "charging.authorized.waiting": "Zahlung bestätigt — zum Laden einstecken",
   "charging.rejected": "Ladevorgang abgelehnt",
   "charging.finished": "Ladevorgang abgeschlossen",
   "charging.lastupdate": "Letzte Aktualisierung",

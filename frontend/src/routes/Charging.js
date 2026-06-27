@@ -28,7 +28,6 @@ export default function Charging() {
   const { evseId, sessionId } = useParams();
 
   const refreshTimer = React.useRef(null);
-  const sessionNotFoundRetryCounter = React.useRef(0);
 
   // Memoize setSessionData to prevent useEffect from being called unnecessarily
   const setSessionData = React.useCallback(() => {
@@ -72,16 +71,15 @@ export default function Charging() {
             refreshTimer.current = setTimeout(setSessionData, 30 * 1000); // 30s repeat timer, but only if we don't have an end_datetime yet
           }
         } else if (data.id && !data.transaction_start_time) {
-          sessionNotFoundRetryCounter.current++;
-          if (sessionNotFoundRetryCounter.current <= 3) {
-            setTimeout(setSessionData, 5000);
-          } else {
-            setState((prevState) => ({
-              ...prevState,
-              status: 'error',
-              statusMessage: 'charging.error.sessionnotfound',
-            }));
-          }
+          // Paid & authorized, but charging hasn't begun yet — the driver hasn't
+          // plugged in (pay-before-plug) or the charger is still starting up.
+          // Keep waiting; the session begins automatically on plug-in.
+          setState((prevState) => ({
+            ...prevState,
+            status: 'waiting',
+            timestamp: moment().format('DD-MM-YYYY HH:mm:ss'),
+          }));
+          refreshTimer.current = setTimeout(setSessionData, 5000);
         } else {
           // Do sth when session unknown...
           // navigate('/');

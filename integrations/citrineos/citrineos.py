@@ -444,7 +444,9 @@ class CitrineOSIntegration(OcppIntegration):
                 "capture_method": "manual",
             },
             payment_method_types=["card"],
-            restrictions={"completed_sessions": {"limit": int(1)}},
+            # No completed_sessions limit: that restriction deactivates the
+            # PaymentLink after the first completed payment, so re-scanning the
+            # QR / tapping "Pay now" again hit a dead link. Keep it always active.
             **stripe_account_kwargs(stripe_account_id),
         )
         return transactionPaymentLink.url
