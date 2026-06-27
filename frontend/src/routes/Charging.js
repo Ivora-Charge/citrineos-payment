@@ -34,8 +34,11 @@ export default function Charging() {
     axios
       .get(`checkouts/${sessionId}`)
       .then(({ data }) => {
-        // Check if session given
-        if (data.remote_request_status !== 'Accepted') {
+        // Only an explicit rejection is terminal. A blank status means the
+        // payment webhook / RemoteStart hasn't landed yet (it's async and can
+        // arrive a few seconds after Stripe redirects here) — fall through to the
+        // waiting branch and keep polling rather than showing a false rejection.
+        if (data.remote_request_status === 'Rejected') {
           setState((prevState) => ({ ...prevState, status: 'rejected' }));
         } else if (data.id && data.transaction_start_time) {
           const transaction = { ...data };
