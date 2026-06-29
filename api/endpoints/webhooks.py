@@ -191,6 +191,25 @@ async def handle_scan_and_charge(
     stationId: str,
     transactionId: str,
 ):
+    # Resolve the EVSE this checkout belongs to from the checkout's connector. The
+    # transactionId baked into the QR/payment link refers to the plug-in session
+    # that generated the QR, which may already have ended by the time the driver
+    # pays (pay-before-plug) -- so don't depend on it being live to find the EVSE.
+    db_connector = (
+        db.query(Connector).filter(Connector.id == db_checkout.connector_id).first()
+    )
+    db_evse = None
+    if db_connector is not None:
+        db_evse = db.query(Evse).filter(Evse.id == db_connector.evse_id).first()
+    if db_evse is None:
+        db_evse = db.query(Evse).filter(Evse.station_id == stationId).first()
+    if db_evse is None:
+        debug(" [Stripe] No EVSE found for scan & charge checkout")
+        cancel_payment_intent(paymentIntentId)
+        raise HTTPException(
+            status_code=404, detail="No EVSE found for scan & charge checkout"
+        )
+
     ocppTransaction = (
         db.query(Transaction)
         .filter(
@@ -199,17 +218,9 @@ async def handle_scan_and_charge(
         )
         .first()
     )
-    if ocppTransaction is None:
-        debug(" [Stripe] No transaction found for checkout session")
-        cancel_payment_intent(paymentIntentId)
-        raise HTTPException(
-            status_code=404, detail="No transaction found for checkout session"
-        )
-    if ocppTransaction.isActive is False:
-        debug(" [Stripe] Transaction is not active")
-        cancel_payment_intent(paymentIntentId)
-        raise HTTPException(status_code=404, detail="Transaction is not active")
+    session_active = ocppTransaction is not None and ocppTransaction.isActive
 
+    # Authorize the (current or upcoming) session and tie it to this payment.
     authorization = await ocpp_integration.create_authorization(
         str(uuid4()),
         "Central",
@@ -226,22 +237,27 @@ async def handle_scan_and_charge(
         )
 
     idToken = authorization["idToken"]
-    request_body = {"remoteStartId": db_checkout.id, "idToken": idToken}
+    request_body = {
+        "remoteStartId": db_checkout.id,
+        "idToken": idToken,
+        "evseId": ocppTransaction.evse.id
+        if session_active and ocppTransaction.evse is not None
+        else db_evse.ocpp_evse_id,
+    }
 
-    if ocppTransaction.evse is not None:
-        request_body["evseId"] = ocppTransaction.evse.id
-
+    # Send the remote start either way: if the cable is already plugged in
+    # (post-plug scan & charge) the station starts charging immediately; if it
+    # isn't yet (pay-before-plug) the station arms and starts the moment the
+    # driver plugs in. Both paths echo remoteStartId back on the resulting
+    # TransactionEvent(Started), which links the session to this checkout so the
+    # PayServe charging page leaves the "waiting" state. Previously this handler
+    # required a live transaction and cancelled the payment otherwise, breaking
+    # the pay-before-plug flow entirely.
     debug(" [Stripe] remote start request: %r", json.dumps(request_body))
-
-    db_evse = db.query(Evse).filter(Evse.station_id == stationId).first()
-    citrineos_module = (
-        "evdriver"  # TODO set up programatic way to resolve module from action
-    )
-    action = "requestStartTransaction"
     response = ocpp_integration.send_citrineos_message(
         station_id=stationId,
         tenant_id=db_evse.tenant_id,
-        url_path=f"{citrineos_module}/{action}",
+        url_path="evdriver/requestStartTransaction",
         json_payload=request_body,
     )
     remote_start_stop = RequestStartStopStatusEnumType.REJECTED
@@ -252,14 +268,10 @@ async def handle_scan_and_charge(
     db.add(db_checkout)
     db.commit()
 
-    citrineos_module = (
-        "configuration"  # TODO set up programatic way to resolve module from action
-    )
-    action = "clearDisplayMessage"
     ocpp_integration.send_citrineos_message(
         station_id=stationId,
         tenant_id=db_evse.tenant_id,
-        url_path=f"{citrineos_module}/{action}",
+        url_path="configuration/clearDisplayMessage",
         json_payload={"id": db_checkout.qr_code_message_id},
     )
 

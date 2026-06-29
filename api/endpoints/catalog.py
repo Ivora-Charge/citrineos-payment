@@ -8,7 +8,7 @@ header (see config.PAYMENT_CATALOG_SYNC_SECRET). If the secret is not configured
 the endpoints fail closed (503) -- the catalog is never writable anonymously.
 """
 
-from logging import error
+from logging import error, info
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -73,6 +73,9 @@ async def sync_catalog(
             max_voltage=payload.max_voltage,
             max_amperage=payload.max_amperage,
         )
+
+        info(f" [catalog] SYNC SUCCESS for evse_id={payload.evse_id}")
+        info(f" [catalog] payload={payload}")
         db.commit()
     except Exception as exc:  # noqa: BLE001 - surface as 500, keep the DB clean
         db.rollback()

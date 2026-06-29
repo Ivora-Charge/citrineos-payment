@@ -113,8 +113,9 @@ def upsert_payment_catalog(
     # Tariff idempotency: seed.py keyed the tariff on (currency, tax_rate), which
     # is fragile -- two stations with the same currency would share/clobber one
     # tariff. Instead reuse the tariff already wired to this connector (if any),
-    # otherwise create a fresh one. stripe_price_id is left untouched: the
-    # handler lazily creates the Stripe Price on first use and writes it back.
+    # otherwise create a fresh one. stripe_price_id is normally left untouched
+    # (the handler lazily creates the Stripe Price on first use and writes it
+    # back), but it IS cleared below when the hold amount/currency changes.
     existing_connector = (
         db.query(Connector).filter_by(connector_id=connector_id).first()
     )
@@ -139,6 +140,17 @@ def upsert_payment_catalog(
         db.flush()
         tariff_created = True
     else:
+        # Stripe Prices are immutable, so a change to the hold amount or currency
+        # makes the previously-created stripe_price_id stale: the scan-and-charge
+        # PaymentLink would keep authorizing the old amount. Clear it so
+        # process_transaction_started_scan_and_charge recreates the Price from the
+        # new authorization_amount/currency on the next charge. (Currency is
+        # compared case-insensitively because Stripe normalizes it to lowercase,
+        # so "USD" vs "usd" is not a real change.)
+        if tariff.authorization_amount != authorization_amount or (
+            (tariff.currency or "").lower() != (currency or "").lower()
+        ):
+            tariff.stripe_price_id = None
         for k, v in tariff_values.items():
             setattr(tariff, k, v)
         tariff_created = False
