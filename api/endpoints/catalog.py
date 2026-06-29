@@ -11,7 +11,7 @@ the endpoints fail closed (503) -- the catalog is never writable anonymously.
 from logging import error, info
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from config import Config
@@ -43,6 +43,7 @@ def require_sync_secret(
 @router.post("/sync", response_model=CatalogSyncResponse)
 async def sync_catalog(
     payload: CatalogSyncRequest,
+    request: Request,
     db: Session = Depends(get_db),
     _: None = Depends(require_sync_secret),
 ):
@@ -81,6 +82,19 @@ async def sync_catalog(
         db.rollback()
         error(f" [catalog] SYNC ERROR for evse_id={payload.evse_id}: {exc}")
         raise HTTPException(status_code=500, detail="Catalog sync failed")
+
+    # Show (or refresh) the standing "scan to pay" QR on the just-synced charger.
+    # Best-effort: a freshly-onboarded or offline charger may not be reachable, in
+    # which case the next online StatusNotification re-pushes it.
+    try:
+        ocpp_integration = request.app.ocpp_integration
+        evse = (
+            db.query(EvseModel).filter(EvseModel.evse_id == payload.evse_id).first()
+        )
+        if evse is not None:
+            await ocpp_integration.push_standing_qr(db, evse)
+    except Exception as exc:  # noqa: BLE001 - QR display must not fail the sync
+        error(f" [catalog] QR push after sync failed for {payload.evse_id}: {exc}")
 
     return result
 

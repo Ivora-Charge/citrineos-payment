@@ -11,6 +11,7 @@ from sqlalchemy import (
     Float,
     Integer,
     String,
+    text,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -60,6 +61,13 @@ class Evse(Base):
     status = Column(String(48), nullable=False)
     station_id = Column(String(255), nullable=False)
     tenant_id = Column(String(3), nullable=False)
+
+    # Standing "scan to pay" QR shown on the idle charger display. display_message_id
+    # is the OCPP SetDisplayMessage id currently on screen (so it can be cleared /
+    # replaced); qr_image_url caches the uploaded QR asset (the encoded URL is
+    # static per EVSE, so the image is identical every push).
+    display_message_id = Column(Integer)
+    qr_image_url = Column(String(512))
 
     connectors = relationship("Connector", back_populates="evse")
 
@@ -222,8 +230,23 @@ def init_db() -> None:
         bind=engine,
     )
 
-    # more things for init here maybe later
-    pass
+    # Lightweight forward-migration until Alembic lands: create_all() does not add
+    # columns to tables that already exist, so add the standing-QR columns to
+    # payment_evses idempotently.
+    evses_table = f"{Config.DB_TABLE_PREFIX}evses"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f'ALTER TABLE "{evses_table}" '
+                "ADD COLUMN IF NOT EXISTS display_message_id INTEGER"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{evses_table}" '
+                "ADD COLUMN IF NOT EXISTS qr_image_url VARCHAR(512)"
+            )
+        )
 
 
 # Dependency

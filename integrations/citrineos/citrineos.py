@@ -610,6 +610,92 @@ class CitrineOSIntegration(OcppIntegration):
                     db_checkout.transaction_soc = new_soc_value
         return db_checkout
 
+    def _next_display_message_id(self, db: Session, station_id: str) -> int:
+        """Next free OCPP SetDisplayMessage id for a station (ids are unique per
+        station). Mirrors the scan-and-charge id allocation."""
+        most_recent = (
+            db.query(MessageInfoModel)
+            .filter(MessageInfoModel.stationId == station_id)
+            .order_by(MessageInfoModel.id.desc())
+            .first()
+        )
+        return 0 if most_recent is None else most_recent.id + 1
+
+    def _clear_display_message(
+        self, station_id: str, tenant_id: str, message_id: int
+    ) -> None:
+        self.send_citrineos_message(
+            station_id=station_id,
+            tenant_id=tenant_id,
+            url_path="configuration/clearDisplayMessage",
+            json_payload={"id": message_id},
+        )
+
+    async def push_standing_qr(self, db: Session, evse: EvseModel) -> None:
+        """Display the persistent 'scan to pay' QR on an idle charger.
+
+        The QR encodes the PayServe charger-info page (``/checkout/{evse_id}``)
+        with no Stripe link baked in: the page reads tariff pricing live and
+        creates a checkout per driver (web-portal / pay-before-plug flow), so the
+        same QR is reusable across drivers and never goes stale. Pushed when the
+        charger comes online and after a catalog sync. Best-effort: if the charger
+        is offline the SetDisplayMessage simply doesn't reach it, and the next
+        online StatusNotification re-pushes.
+        """
+        # The encoded URL is static per EVSE, so the rendered image never changes:
+        # upload it once and reuse the asset URL on subsequent pushes.
+        if not evse.qr_image_url:
+            checkout_page_url = f"{Config.CLIENT_URL}/checkout/{evse.evse_id}"
+            qr_code_img = qrcode.make(checkout_page_url)
+            buffer = BytesIO()
+            qr_code_img.save(buffer)
+            buffer.seek(0)
+            evse.qr_image_url = self.fileIntegration.upload_file(
+                buffer,
+                "image/png",
+                f"qrcode_{evse.evse_id}.png",
+                f"QRCode_{evse.evse_id}",
+            )
+
+        # Replace any standing QR already on the display.
+        if evse.display_message_id is not None:
+            self._clear_display_message(
+                evse.station_id, evse.tenant_id, evse.display_message_id
+            )
+
+        next_id = self._next_display_message_id(db, evse.station_id)
+        set_display_message_request = {
+            "message": {
+                "id": next_id,
+                "priority": "AlwaysFront",
+                # Idle: the charger shows this "scan to pay" message only while the
+                # connector is idle and hides it once a session starts -- matching
+                # the standing-QR intent (and complementing clear_standing_qr).
+                "state": "Idle",
+                "message": {"format": "URI", "content": evse.qr_image_url},
+            }
+        }
+        self.send_citrineos_message(
+            station_id=evse.station_id,
+            tenant_id=evse.tenant_id,
+            url_path="configuration/setDisplayMessage",
+            json_payload=set_display_message_request,
+        )
+        evse.display_message_id = next_id
+        db.add(evse)
+        db.commit()
+
+    async def clear_standing_qr(self, db: Session, evse: EvseModel) -> None:
+        """Remove the standing pay QR (charger in use / unavailable)."""
+        if evse.display_message_id is None:
+            return
+        self._clear_display_message(
+            evse.station_id, evse.tenant_id, evse.display_message_id
+        )
+        evse.display_message_id = None
+        db.add(evse)
+        db.commit()
+
     async def process_status_notification(
         self,
         status_notification: StatusNotificationRequest,
@@ -629,8 +715,28 @@ class CitrineOSIntegration(OcppIntegration):
             )
             return
 
+        previous_status = db_evse.status
         db_evse.status = status_notification.connectorStatus
         db.add(db_evse)
         db.commit()
         db.refresh(db_evse)
+
+        # Standing "scan to pay" QR: show it when the connector is Available (idle)
+        # and clear it when it's in use / unavailable. Only act on a transition (or
+        # a first-time display) so we don't re-push on every repeated
+        # StatusNotification. Best-effort -- a display failure must not break status
+        # tracking.
+        available = "Available"
+        try:
+            if db_evse.status == available and (
+                previous_status != available or db_evse.display_message_id is None
+            ):
+                await self.push_standing_qr(db, db_evse)
+            elif (
+                db_evse.status != available
+                and db_evse.display_message_id is not None
+            ):
+                await self.clear_standing_qr(db, db_evse)
+        except Exception as e:
+            exception(" [CitrineOS] Standing-QR update failed: %r", e.__str__())
         return
