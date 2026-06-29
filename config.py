@@ -59,7 +59,7 @@ class AppConfig:
     # When true, settlement bills any cost above the captured hold as a second
     # off-session charge on the saved card (the "overage" charge). Requires the
     # checkout to have saved the card (web-portal flow). Off => cap-at-hold.
-    OVERAGE_CHARGE_ENABLED: bool = False
+    OVERAGE_CHARGE_ENABLED: bool = True
 
     # Dev-only convenience: when AUTO_SEED=true the startup hook in main.py seeds
     # one catalog chain from the SEED_* values below (same upsert as seed.py and

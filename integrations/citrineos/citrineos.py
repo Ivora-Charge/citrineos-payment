@@ -440,8 +440,15 @@ class CitrineOSIntegration(OcppIntegration):
                 "transactionId": transactionId,
                 "checkoutId": checkoutId,
             },
+            # Save the card (Stripe vaults it under a Customer; we keep only the
+            # tokens on the PaymentIntent) so settlement can bill any cost above
+            # the hold as a second off-session "overage" charge -- same as the
+            # web-portal checkout. Without this, scan & charge sessions can't be
+            # overage-billed and just cap at the hold.
+            customer_creation="always",
             payment_intent_data={
                 "capture_method": "manual",
+                "setup_future_usage": "off_session",
             },
             payment_method_types=["card"],
             # No completed_sessions limit: that restriction deactivates the
