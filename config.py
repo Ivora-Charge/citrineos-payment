@@ -56,6 +56,11 @@ class AppConfig:
     # so the catalog can never be mutated by an unauthenticated caller.
     PAYMENT_CATALOG_SYNC_SECRET: str = ""
 
+    # When true, settlement bills any cost above the captured hold as a second
+    # off-session charge on the saved card (the "overage" charge). Requires the
+    # checkout to have saved the card (web-portal flow). Off => cap-at-hold.
+    OVERAGE_CHARGE_ENABLED: bool = False
+
     # Dev-only convenience: when AUTO_SEED=true the startup hook in main.py seeds
     # one catalog chain from the SEED_* values below (same upsert as seed.py and
     # the /catalog/sync API). Leave off in any shared/prod environment -- the

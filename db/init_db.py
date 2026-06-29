@@ -131,6 +131,10 @@ class Checkout(Base):
 
     id = Column(Integer, primary_key=True, autoincrement="auto", index=True)
     payment_intent_id = Column(String(255), index=True, unique=True)
+    # Second off-session PaymentIntent that bills cost above the captured hold
+    # (the overage charge). NULL until/unless an overage is charged; set so a
+    # duplicate Ended event can't double-charge.
+    overage_payment_intent_id = Column(String(255))
     authorization_amount = Column(
         Float,
     )
@@ -245,6 +249,12 @@ def init_db() -> None:
             text(
                 f'ALTER TABLE "{evses_table}" '
                 "ADD COLUMN IF NOT EXISTS qr_image_url VARCHAR(512)"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
+                "ADD COLUMN IF NOT EXISTS overage_payment_intent_id VARCHAR(255)"
             )
         )
 

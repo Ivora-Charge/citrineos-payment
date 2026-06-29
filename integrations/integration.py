@@ -6,8 +6,13 @@ import requests
 import stripe
 from sqlalchemy.orm import Session
 
+from config import Config
 from db.init_db import get_db, Checkout, Connector, Evse, Location, Operator
 from utils.utils import generate_pricing, stripe_account_kwargs
+
+# Stripe rejects charges below the per-currency minimum (~$0.50 for USD); skip
+# overages smaller than this rather than fail the second charge.
+STRIPE_MIN_CHARGE_SUBUNITS = 50
 
 
 class OcppIntegration:
@@ -56,6 +61,7 @@ class OcppIntegration:
         # authorization, capture the full hold instead of letting Stripe reject
         # the capture for exceeding the authorized amount.
         amount_to_capture = pricing.total_costs_gross
+        overage_subunits = 0
         if (
             db_checkout.authorization_amount is not None
             and amount_to_capture > db_checkout.authorization_amount
@@ -65,6 +71,9 @@ class OcppIntegration:
                 f"{amount_to_capture} exceeds authorized "
                 f"{db_checkout.authorization_amount}; capping capture at the "
                 f"authorized amount."
+            )
+            overage_subunits = int(amount_to_capture) - int(
+                db_checkout.authorization_amount
             )
             amount_to_capture = int(db_checkout.authorization_amount)
 
@@ -81,7 +90,75 @@ class OcppIntegration:
             return
 
         info(f"CAPTURE SUCCESS - Captured the costs for Checkout: {db_checkout.id}")
+
+        # Overage: the hold was the ceiling on what the capture could collect, so
+        # bill the remainder as a second off-session charge on the saved card.
+        if (
+            Config.OVERAGE_CHARGE_ENABLED
+            and overage_subunits >= STRIPE_MIN_CHARGE_SUBUNITS
+            and db_checkout.overage_payment_intent_id is None
+        ):
+            self._charge_overage(
+                db, db_checkout, db_operator, suc_intent, pricing, overage_subunits
+            )
         return
+
+    def _charge_overage(
+        self,
+        db: Session,
+        db_checkout: Checkout,
+        db_operator: Operator,
+        hold_intent,
+        pricing,
+        overage_subunits: int,
+    ) -> None:
+        """Charge cost above the captured hold as a second off-session PaymentIntent
+        on the saved card.
+
+        The saved Customer + PaymentMethod live on the hold PaymentIntent, and are
+        only present when the checkout saved the card (web-portal flow). The
+        scan-and-charge PaymentLink flow doesn't save a card, so this no-ops and the
+        session simply caps at the hold. Off-session declines (insufficient funds, or
+        SCA required with the driver gone) are logged, not raised -- the guaranteed
+        hold is already captured.
+        """
+        customer_id = getattr(hold_intent, "customer", None)
+        payment_method_id = getattr(hold_intent, "payment_method", None)
+        if not customer_id or not payment_method_id:
+            info(
+                f" [integrations] Checkout {db_checkout.id}: no saved card; skipping "
+                f"${overage_subunits / 100:.2f} overage (capped at hold)."
+            )
+            return
+
+        try:
+            overage_intent = stripe.PaymentIntent.create(
+                amount=int(overage_subunits),
+                currency=pricing.currency.lower(),
+                customer=customer_id,
+                payment_method=payment_method_id,
+                off_session=True,
+                confirm=True,
+                metadata={"checkoutId": db_checkout.id, "type": "overage"},
+                **stripe_account_kwargs(db_operator.stripe_account_id),
+            )
+            db_checkout.overage_payment_intent_id = overage_intent.id
+            db.add(db_checkout)
+            db.commit()
+            info(
+                f" [integrations] OVERAGE SUCCESS - Checkout {db_checkout.id}: charged "
+                f"${overage_subunits / 100:.2f} (status={overage_intent.status})."
+            )
+        except stripe.error.CardError as e:
+            error(
+                f" [integrations] OVERAGE DECLINED - Checkout {db_checkout.id}: "
+                f"${overage_subunits / 100:.2f} -- {getattr(e, 'user_message', None) or e}"
+            )
+        except Exception as e:
+            error(
+                f" [integrations] OVERAGE ERROR - Checkout {db_checkout.id}: "
+                f"${overage_subunits / 100:.2f} -- {e}"
+            )
 
     """
     Creates an Authorization in the CitrineOS system.

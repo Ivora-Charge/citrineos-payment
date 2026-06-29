@@ -55,8 +55,14 @@ def create_checkout(request_body: CheckoutCreate, db: Session = Depends(get_db))
             },
         ],
         metadata={"checkoutId": db_checkout.id},
+        # Save the card (Stripe vaults it under a Customer; we keep only the
+        # tokens on the PaymentIntent) so settlement can bill any cost above the
+        # hold as a second off-session "overage" charge. Stripe Checkout shows the
+        # off-session mandate consent automatically.
+        customer_creation="always",
         payment_intent_data={
             "capture_method": "manual",
+            "setup_future_usage": "off_session",
         },
         **stripe_account_kwargs(location.operator.stripe_account_id),
         mode="payment",
