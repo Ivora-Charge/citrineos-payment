@@ -84,6 +84,10 @@ STRIPE_ENDPOINT_SECRET_ACCOUNT="whsec_some-stripe-signing-secret"
 (Webhook needs to be configured with stripe and given secret needs to be used)
 STRIPE_ENDPOINT_SECRET_CONNECT="whsec_some-stripe-signing-secret"
 
+## Bill cost above the captured hold as a second off-session "overage" charge on
+## the saved card (default false => cap at the hold). See the Developer Guide.
+OVERAGE_CHARGE_ENABLED=false
+
 # Development Setup
 
 ## Quick start (full stack)
@@ -226,6 +230,177 @@ SEED_STRIPE_ACCOUNT_ID=platform <run the service>
 > The catalog sync API, `seed.py`, and `AUTO_SEED` all share
 > `catalog/sync.py:upsert_payment_catalog`, so they stay in lockstep and are
 > mutually backward compatible.
+
+# Developer Guide
+
+This service is a FastAPI app that sits between **CitrineOS** (the OCPP CSMS) and
+**Stripe**. It owns the payment lifecycle of a charging session: showing a pay
+QR, taking the payment, telling CitrineOS to start the charge, metering it from
+OCPP events, and settling the money at the end.
+
+## Architecture at a glance
+
+```
+  Driver phone                Charger (OCPP)
+       │  scan QR / pay             │  StatusNotification / TransactionEvent
+       ▼                            ▼
+  PayServe (frontend) ──HTTP──►  CitrineOS  ──RabbitMQ──►  payment event consumer
+       │                            ▲                          (integrations/citrineos)
+       │ /api/*                     │  message API                   │
+       ▼                            │  (SetDisplayMessage,           │ updates
+   payment API  ──────────────────► │   RequestStartTransaction,     ▼
+   (api/endpoints)                  │   DataTransfer, …)         payment_* tables
+       │                            └───────────────────────────     │
+       ▼                                                              ▼
+     Stripe  ◄────────  webhooks (/api/webhooks/stripe)  ◄──── capture / overage
+```
+
+Two things drive the service:
+
+1. **The REST API** (`api/`) — called by the PayServe frontend (`evses`,
+   `locations`, `tariffs`, `checkouts`) and by trusted backends (`catalog`).
+2. **The OCPP event consumer** (`integrations/citrineos/citrineos.py`) — a
+   long-running RabbitMQ consumer started from `main.py` that reacts to
+   `TransactionEvent` and `StatusNotification` and pushes messages back to
+   chargers through CitrineOS's message API.
+
+## Repository layout
+
+| Path | What lives there |
+| ---- | ---------------- |
+| `main.py` | App bootstrap: sets `stripe.api_key`, runs `init_db()`, attaches `app.ocpp_integration`, starts the event-consumer task, optional `AUTO_SEED`. |
+| `api/api.py` | Mounts the routers under `/api`. |
+| `api/endpoints/` | `checkouts`, `evses`, `locations`, `tariffs`, `webhooks`, `catalog`. |
+| `integrations/integration.py` | Base classes `OcppIntegration` (incl. `capture_payment_transaction`) and `FileIntegration`. |
+| `integrations/citrineos/citrineos.py` | `CitrineOSIntegration`: event consumer + handlers, and `send_citrineos_message` to talk to chargers. |
+| `integrations/charger_display.py` | **Charger-display adapters** — how each charger family renders the pay QR (extension point). |
+| `integrations/directus/directus.py` | Uploads QR images to Directus (a `FileIntegration`). |
+| `catalog/sync.py` | `upsert_payment_catalog` — the one source of truth for the `payment_*` catalog chain. |
+| `db/init_db.py` | SQLAlchemy models (`payment_*` tables + read-only maps of CitrineOS tables) and `init_db()`. |
+| `model/transaction_summary.py`, `utils/utils.py` | Pricing math (`generate_pricing`) and Stripe helpers. |
+| `schemas/` | Pydantic request/response models. |
+| `frontend/` | PayServe React app (the driver-facing pages). |
+
+## Charging & payment flows
+
+- **Web-portal** — driver opens `/checkout/{evse_id}` → `POST /api/checkouts`
+  creates a Stripe **Checkout Session** (a manual-capture hold) → on payment the
+  `checkout.session.completed` webhook runs `handle_web_portal`, which authorizes
+  and sends `RequestStartTransaction` (the charger *arms* and starts on plug-in).
+- **Scan & charge** — an unauthorized plug-in (`TransactionEvent` Started,
+  `CablePluggedIn`, no idToken) makes the service create a Stripe **PaymentLink**
+  + QR and push it to the charger; after payment `handle_scan_and_charge` arms/
+  starts the session. Requires `CITRINEOS_SCAN_AND_CHARGE=true`.
+- **Standing "scan to pay" QR** — pushed when a charger goes `Available`
+  (`process_status_notification`) and after a catalog sync; cleared when the
+  connector is in use. Encodes the static `/checkout/{evse_id}` page.
+- **Settlement** — `TransactionEvent` Ended → `process_transaction_ended` →
+  `capture_payment_transaction`.
+
+Both checkout flows save the card (`setup_future_usage=off_session`) so settlement
+can bill an overage (below).
+
+## Billing model: hold → capture → overage
+
+A session places a **manual-capture authorization hold** of `authorization_amount`
+at checkout. At the end, `capture_payment_transaction`:
+
+1. Computes the real cost via `generate_pricing` (energy + time + session fee + tax).
+2. Captures it, **capped at the hold** (Stripe can't capture more than authorized).
+3. If `OVERAGE_CHARGE_ENABLED` and the cost exceeded the hold, bills the remainder
+   as a **second off-session PaymentIntent** on the saved card (`_charge_overage`).
+   Off-session declines/SCA are logged, not raised; `overage_payment_intent_id`
+   makes it idempotent against duplicate `Ended` events.
+
+Time cost uses the **OCPP packet timestamps** (`transaction_event.timestamp`), not
+receive time, so a replayed offline `Ended` still bills the real duration.
+
+## Extension points
+
+### Add support for a new charger family (display adapter)
+
+Different chargers accept the pay QR differently — the standard way is OCPP
+`SetDisplayMessage` with a rendered image; Renova ("rcd") devices take a URL over
+a vendor `DataTransfer` and render the QR themselves. This is pluggable in
+`integrations/charger_display.py`:
+
+```python
+class MyChargerDisplayAdapter(ChargerDisplayAdapter):
+    async def show_payment_qr(self, ocpp, db, evse, *, payment_url, price, currency):
+        ocpp.send_citrineos_message(
+            station_id=evse.station_id, tenant_id=evse.tenant_id,
+            url_path="configuration/dataTransfer",          # or setDisplayMessage, …
+            json_payload={...},
+        )
+        evse.display_message_id = SHOWN_SENTINEL  # any non-null = "a QR is shown"
+        db.add(evse); db.commit()
+
+    async def clear_payment_qr(self, ocpp, db, evse):
+        ...
+        evse.display_message_id = None
+        db.add(evse); db.commit()
+
+ADAPTERS["mycharger"] = MyChargerDisplayAdapter()
+```
+
+Then set `charger_type = 'mycharger'` on the relevant `payment_evses` rows. The
+adapter is resolved per-EVSE by `get_display_adapter(evse)`; unset/unknown types
+fall back to `"standard"`. `ocpp` (the `CitrineOSIntegration`) gives you
+`send_citrineos_message`, `fileIntegration.upload_file`, and the display-message
+id helpers. Nothing in the payment flow changes.
+
+### Send an OCPP message to a charger
+
+```python
+self.send_citrineos_message(
+    station_id=..., tenant_id=...,
+    url_path="<citrineos-module>/<camelCaseAction>",   # e.g. evdriver/requestStartTransaction
+    json_payload={...},                                # the OCPP request body
+)
+```
+
+`url_path` is the CitrineOS message-API route: the module that owns the action
+plus the action name. Examples in use: `configuration/setDisplayMessage`,
+`configuration/clearDisplayMessage`, `configuration/dataTransfer`,
+`evdriver/requestStartTransaction`.
+
+### Handle a new OCPP event
+
+Bind the action in `_consume_events` (the `arguments_list` headers binding) and
+dispatch it in `process_incoming_event`. The consumer currently binds
+`TransactionEvent` and `StatusNotification`.
+
+### Add a database column
+
+There is no Alembic yet, and `create_all()` does **not** add columns to existing
+tables. So a new column needs **two** edits in `db/init_db.py`:
+
+1. add the `Column(...)` to the model, and
+2. add an idempotent `ALTER TABLE "<table>" ADD COLUMN IF NOT EXISTS ...` in
+   `init_db()` (see the `payment_evses` / `payment_checkouts` examples there).
+
+### Add an API endpoint
+
+Create a router in `api/endpoints/` and mount it in `api/api.py`
+(`api_router.include_router(..., prefix="/...")`). Service-to-service write
+endpoints should require a shared secret like `catalog.py` does.
+
+## Local dev loop
+
+```bash
+# run (full stack) — see Development Setup above
+./setup_payment_stack.sh
+
+# restart just the app after a code change
+kill $(cat payment.pid) 2>/dev/null
+./.venv/bin/uvicorn main:app --host 0.0.0.0 --port 9010 > payment.log 2>&1 &
+
+# watch what the service is doing (events, captures, OCPP sends)
+tail -f payment.log
+```
+
+The service is stateless beyond the DB, so a restart is safe at any time. DB
+columns are added by `init_db()` on boot (the idempotent ALTERs above).
 
 ## Tests
 
