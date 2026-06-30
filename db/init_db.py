@@ -68,6 +68,11 @@ class Evse(Base):
     # static per EVSE, so the image is identical every push).
     display_message_id = Column(Integer)
     qr_image_url = Column(String(512))
+    # Selects the charger-display adapter (integrations/charger_display.py): how
+    # this charger family wants the payment QR delivered. NULL/"standard" =>
+    # OCPP SetDisplayMessage with a rendered image; "renova" => vendor
+    # DataTransfer with a URL the device renders itself.
+    charger_type = Column(String(32))
 
     connectors = relationship("Connector", back_populates="evse")
 
@@ -249,6 +254,12 @@ def init_db() -> None:
             text(
                 f'ALTER TABLE "{evses_table}" '
                 "ADD COLUMN IF NOT EXISTS qr_image_url VARCHAR(512)"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{evses_table}" '
+                "ADD COLUMN IF NOT EXISTS charger_type VARCHAR(32)"
             )
         )
         conn.execute(
