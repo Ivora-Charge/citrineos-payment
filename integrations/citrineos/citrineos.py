@@ -27,7 +27,10 @@ from db.init_db import (
 )
 
 from integrations.integration import FileIntegration, OcppIntegration
-from integrations.charger_display import get_display_adapter
+from integrations.charger_display import (
+    charger_type_for_vendor,
+    get_display_adapter,
+)
 from schemas.status_notification import StatusNotificationRequest
 from utils.utils import stripe_account_kwargs
 from schemas.transaction_event import (
@@ -666,6 +669,7 @@ class CitrineOSIntegration(OcppIntegration):
         How the QR is delivered depends on the charger family -- resolved via the
         EVSE's charger_type to a ChargerDisplayAdapter (see charger_display.py).
         """
+        self._resolve_charger_type(db, evse)
         payment_url = f"{Config.CLIENT_URL}/checkout/{evse.evse_id}"
         price, currency = self._evse_tariff_price(evse)
         adapter = get_display_adapter(evse)
@@ -675,8 +679,50 @@ class CitrineOSIntegration(OcppIntegration):
 
     async def clear_standing_qr(self, db: Session, evse: EvseModel) -> None:
         """Remove the standing pay QR (charger in use / unavailable)."""
+        self._resolve_charger_type(db, evse)
         adapter = get_display_adapter(evse)
         await adapter.clear_payment_qr(self, db, evse)
+
+    def _station_vendor(self, db: Session, station_id: str, tenant_id: str):
+        """The charger's reported vendor (ChargingStations.chargePointVendor) for
+        a station, or None. Read straight from the shared CitrineOS table."""
+        try:
+            row = db.execute(
+                sql_text(
+                    'SELECT "chargePointVendor" FROM "ChargingStations" '
+                    'WHERE "ocppConnectionName" = :sid AND "tenantId" = :tid '
+                    "LIMIT 1"
+                ),
+                {"sid": station_id, "tid": int(tenant_id)},
+            ).first()
+            return row[0] if row else None
+        except Exception as e:
+            warning(
+                " [CitrineOS] charger vendor lookup failed for %s: %r",
+                station_id,
+                e.__str__(),
+            )
+            return None
+
+    def _resolve_charger_type(self, db: Session, evse: EvseModel) -> None:
+        """Auto-detect the charger family from the CitrineOS BootNotification
+        vendor and cache it on the EVSE. A charger_type already set (manual
+        override or a prior detection) is never overwritten -- clear the column to
+        force re-detection."""
+        if evse.charger_type:
+            return
+        vendor = self._station_vendor(db, evse.station_id, evse.tenant_id)
+        detected = charger_type_for_vendor(vendor)
+        if detected:
+            evse.charger_type = detected
+            db.add(evse)
+            db.commit()
+            info(
+                " [CitrineOS] EVSE %s: detected charger_type=%r from vendor %r",
+                evse.evse_id,
+                detected,
+                vendor,
+            )
 
     async def process_status_notification(
         self,

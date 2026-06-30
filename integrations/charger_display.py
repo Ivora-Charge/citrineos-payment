@@ -166,6 +166,20 @@ ADAPTERS = {
 }
 DEFAULT_ADAPTER = "standard"
 
+# Auto-detect charger_type from the CitrineOS BootNotification vendor
+# (ChargingStations.chargePointVendor). Matched case-insensitively. Extend this
+# as more vendors are onboarded; a manually-set charger_type always wins.
+CHARGER_TYPE_BY_VENDOR = {
+    "RCD": "renova",
+}
+
+
+def charger_type_for_vendor(vendor) -> "str | None":
+    """Map a charger's reported vendor to a charger_type, or None if unknown."""
+    if not vendor:
+        return None
+    return CHARGER_TYPE_BY_VENDOR.get(str(vendor).strip().upper())
+
 
 def get_display_adapter(evse) -> ChargerDisplayAdapter:
     """Resolve the display adapter for an EVSE from its ``charger_type`` (falls

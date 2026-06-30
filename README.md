@@ -343,9 +343,13 @@ class MyChargerDisplayAdapter(ChargerDisplayAdapter):
 ADAPTERS["mycharger"] = MyChargerDisplayAdapter()
 ```
 
-Then set `charger_type = 'mycharger'` on the relevant `payment_evses` rows. The
-adapter is resolved per-EVSE by `get_display_adapter(evse)`; unset/unknown types
-fall back to `"standard"`. `ocpp` (the `CitrineOSIntegration`) gives you
+`charger_type` is **auto-detected** from the charger's BootNotification vendor:
+add a `CHARGER_TYPE_BY_VENDOR` entry (e.g. `"RCD" -> "renova"`) and the service
+resolves and caches it on first push by reading the CitrineOS
+`ChargingStations.chargePointVendor`. A value set by hand
+(`UPDATE payment_evses SET charger_type='mycharger' …`) always wins. The adapter
+is resolved per-EVSE by `get_display_adapter(evse)`; unset/unknown types fall
+back to `"standard"`. `ocpp` (the `CitrineOSIntegration`) gives you
 `send_citrineos_message`, `fileIntegration.upload_file`, and the display-message
 id helpers. Nothing in the payment flow changes.
 
