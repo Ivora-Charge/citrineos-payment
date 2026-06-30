@@ -6,7 +6,8 @@ vendors (e.g. Renova / Rainbow "rcd") instead take a *URL* over a vendor
 ``DataTransfer`` and render the QR on the device themselves.
 
 To support a new charger family, add a ``ChargerDisplayAdapter`` subclass and
-register it in ``ADAPTERS`` keyed by the ``charger_type`` stored on the EVSE.
+register it in ``ADAPTERS`` keyed by the ``display_adapter_type`` stored on the
+EVSE.
 Nothing else in the payment flow needs to change -- ``push_standing_qr`` /
 ``clear_standing_qr`` resolve the right adapter via ``get_display_adapter``.
 
@@ -159,37 +160,40 @@ class RenovaDisplayAdapter(ChargerDisplayAdapter):
         db.commit()
 
 
-# Registry: charger_type -> adapter instance. Add new charger families here.
+# Registry: display_adapter_type -> adapter instance. Add new charger families here.
 ADAPTERS = {
     "standard": StandardDisplayAdapter(),
     "renova": RenovaDisplayAdapter(),
 }
 DEFAULT_ADAPTER = "standard"
 
-# Auto-detect charger_type from the CitrineOS BootNotification vendor
+# Auto-detect the display_adapter_type from the CitrineOS BootNotification vendor
 # (ChargingStations.chargePointVendor). Matched case-insensitively. Extend this
-# as more vendors are onboarded; a manually-set charger_type always wins.
-CHARGER_TYPE_BY_VENDOR = {
+# as more vendors are onboarded; a manually-set display_adapter_type always wins.
+DISPLAY_ADAPTER_BY_VENDOR = {
     "RCD": "renova",
 }
 
 
-def charger_type_for_vendor(vendor) -> "str | None":
-    """Map a charger's reported vendor to a charger_type, or None if unknown."""
+def display_adapter_for_vendor(vendor) -> "str | None":
+    """Map a charger's reported vendor to a display_adapter_type, or None."""
     if not vendor:
         return None
-    return CHARGER_TYPE_BY_VENDOR.get(str(vendor).strip().upper())
+    return DISPLAY_ADAPTER_BY_VENDOR.get(str(vendor).strip().upper())
 
 
 def get_display_adapter(evse) -> ChargerDisplayAdapter:
-    """Resolve the display adapter for an EVSE from its ``charger_type`` (falls
-    back to the standard SetDisplayMessage adapter for unknown/unset types)."""
-    charger_type = (getattr(evse, "charger_type", None) or DEFAULT_ADAPTER).lower()
-    adapter = ADAPTERS.get(charger_type)
+    """Resolve the display adapter for an EVSE from its ``display_adapter_type``
+    (falls back to the standard SetDisplayMessage adapter for unknown/unset
+    types)."""
+    adapter_type = (
+        getattr(evse, "display_adapter_type", None) or DEFAULT_ADAPTER
+    ).lower()
+    adapter = ADAPTERS.get(adapter_type)
     if adapter is None:
         info(
-            " [charger_display] Unknown charger_type %r for EVSE %s; using %r",
-            charger_type,
+            " [charger_display] Unknown display_adapter_type %r for EVSE %s; using %r",
+            adapter_type,
             getattr(evse, "evse_id", "?"),
             DEFAULT_ADAPTER,
         )

@@ -72,7 +72,7 @@ class Evse(Base):
     # this charger family wants the payment QR delivered. NULL/"standard" =>
     # OCPP SetDisplayMessage with a rendered image; "renova" => vendor
     # DataTransfer with a URL the device renders itself.
-    charger_type = Column(String(32))
+    display_adapter_type = Column(String(32))
 
     connectors = relationship("Connector", back_populates="evse")
 
@@ -256,10 +256,26 @@ def init_db() -> None:
                 "ADD COLUMN IF NOT EXISTS qr_image_url VARCHAR(512)"
             )
         )
+        # Rename the legacy column to display_adapter_type if it's still around
+        # (preserves data), then ensure the column exists for fresh installs.
+        conn.execute(
+            text(
+                "DO $$ BEGIN "
+                "IF EXISTS (SELECT 1 FROM information_schema.columns "
+                f"WHERE table_name = '{evses_table}' "
+                "AND column_name = 'charger_type') "
+                "AND NOT EXISTS (SELECT 1 FROM information_schema.columns "
+                f"WHERE table_name = '{evses_table}' "
+                "AND column_name = 'display_adapter_type') THEN "
+                f'ALTER TABLE "{evses_table}" '
+                "RENAME COLUMN charger_type TO display_adapter_type; "
+                "END IF; END $$;"
+            )
+        )
         conn.execute(
             text(
                 f'ALTER TABLE "{evses_table}" '
-                "ADD COLUMN IF NOT EXISTS charger_type VARCHAR(32)"
+                "ADD COLUMN IF NOT EXISTS display_adapter_type VARCHAR(32)"
             )
         )
         conn.execute(

@@ -28,7 +28,7 @@ from db.init_db import (
 
 from integrations.integration import FileIntegration, OcppIntegration
 from integrations.charger_display import (
-    charger_type_for_vendor,
+    display_adapter_for_vendor,
     get_display_adapter,
 )
 from schemas.status_notification import StatusNotificationRequest
@@ -667,9 +667,10 @@ class CitrineOSIntegration(OcppIntegration):
         StatusNotification re-pushes.
 
         How the QR is delivered depends on the charger family -- resolved via the
-        EVSE's charger_type to a ChargerDisplayAdapter (see charger_display.py).
+        EVSE's display_adapter_type to a ChargerDisplayAdapter (see
+        charger_display.py).
         """
-        self._resolve_charger_type(db, evse)
+        self._resolve_display_adapter_type(db, evse)
         payment_url = f"{Config.CLIENT_URL}/checkout/{evse.evse_id}"
         price, currency = self._evse_tariff_price(evse)
         adapter = get_display_adapter(evse)
@@ -679,7 +680,7 @@ class CitrineOSIntegration(OcppIntegration):
 
     async def clear_standing_qr(self, db: Session, evse: EvseModel) -> None:
         """Remove the standing pay QR (charger in use / unavailable)."""
-        self._resolve_charger_type(db, evse)
+        self._resolve_display_adapter_type(db, evse)
         adapter = get_display_adapter(evse)
         await adapter.clear_payment_qr(self, db, evse)
 
@@ -704,21 +705,21 @@ class CitrineOSIntegration(OcppIntegration):
             )
             return None
 
-    def _resolve_charger_type(self, db: Session, evse: EvseModel) -> None:
+    def _resolve_display_adapter_type(self, db: Session, evse: EvseModel) -> None:
         """Auto-detect the charger family from the CitrineOS BootNotification
-        vendor and cache it on the EVSE. A charger_type already set (manual
-        override or a prior detection) is never overwritten -- clear the column to
-        force re-detection."""
-        if evse.charger_type:
+        vendor and cache it on the EVSE as display_adapter_type. A value already
+        set (manual override or a prior detection) is never overwritten -- clear
+        the column to force re-detection."""
+        if evse.display_adapter_type:
             return
         vendor = self._station_vendor(db, evse.station_id, evse.tenant_id)
-        detected = charger_type_for_vendor(vendor)
+        detected = display_adapter_for_vendor(vendor)
         if detected:
-            evse.charger_type = detected
+            evse.display_adapter_type = detected
             db.add(evse)
             db.commit()
             info(
-                " [CitrineOS] EVSE %s: detected charger_type=%r from vendor %r",
+                " [CitrineOS] EVSE %s: detected display_adapter_type=%r from vendor %r",
                 evse.evse_id,
                 detected,
                 vendor,
