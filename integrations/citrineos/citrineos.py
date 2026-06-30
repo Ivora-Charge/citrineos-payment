@@ -28,6 +28,7 @@ from db.init_db import (
 
 from integrations.integration import FileIntegration, OcppIntegration
 from integrations.charger_display import (
+    DEFAULT_ADAPTER,
     display_adapter_for_vendor,
     get_display_adapter,
 )
@@ -706,22 +707,24 @@ class CitrineOSIntegration(OcppIntegration):
             return None
 
     def _resolve_display_adapter_type(self, db: Session, evse: EvseModel) -> None:
-        """Auto-detect the charger family from the CitrineOS BootNotification
-        vendor and cache it on the EVSE as display_adapter_type. A value already
-        set (manual override or a prior detection) is never overwritten -- clear
-        the column to force re-detection."""
-        if evse.display_adapter_type:
-            return
+        """Keep display_adapter_type in step with the charger's BootNotification
+        vendor. Runs on every standing-QR push -- i.e. on a status change *and*
+        after a catalog sync -- so a vendor change (reflash, swapped unit, edited
+        BootNotification) is picked up automatically, in either direction. When
+        the charger hasn't reported a vendor yet, the current value is left as-is
+        (the next push, once it has booted, will set it)."""
         vendor = self._station_vendor(db, evse.station_id, evse.tenant_id)
-        detected = display_adapter_for_vendor(vendor)
-        if detected:
-            evse.display_adapter_type = detected
+        if not vendor:
+            return
+        new_type = display_adapter_for_vendor(vendor) or DEFAULT_ADAPTER
+        if evse.display_adapter_type != new_type:
+            evse.display_adapter_type = new_type
             db.add(evse)
             db.commit()
             info(
-                " [CitrineOS] EVSE %s: detected display_adapter_type=%r from vendor %r",
+                " [CitrineOS] EVSE %s: set display_adapter_type=%r from vendor %r",
                 evse.evse_id,
-                detected,
+                new_type,
                 vendor,
             )
 
