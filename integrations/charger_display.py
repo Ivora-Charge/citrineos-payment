@@ -267,7 +267,6 @@ DISPLAY_ADAPTER_BY_VENDOR = {
 
 def display_adapter_for_vendor(vendor) -> "str | None":
     """Map a charger's reported vendor to a display_adapter_type, or None."""
-    info(f" [charger_display] vendor={vendor}")
     if not vendor:
         return None
     return DISPLAY_ADAPTER_BY_VENDOR.get(str(vendor).strip().upper())
@@ -277,7 +276,6 @@ def get_display_adapter(evse) -> ChargerDisplayAdapter:
     """Resolve the display adapter for an EVSE from its ``display_adapter_type``
     (falls back to the standard SetDisplayMessage adapter for unknown/unset
     types)."""
-    info(f" [charger_display] evse={evse.evse_id} display_adapter_type={evse.display_adapter_type}")
     adapter_type = (
         getattr(evse, "display_adapter_type", None) or DEFAULT_ADAPTER
     ).lower()
