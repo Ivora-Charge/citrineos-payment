@@ -39,6 +39,26 @@ class ChargerDisplayAdapter:
     async def clear_payment_qr(self, ocpp, db, evse) -> None:
         raise NotImplementedError
 
+    async def show_transaction_qr(
+        self,
+        ocpp,
+        db,
+        evse,
+        *,
+        payment_url: str,
+        transaction_id: str,
+        price,
+        currency: str,
+    ) -> "int | None":
+        """Show the scan-and-charge (transaction-bound) QR while an unauthorized
+        session waits for payment. Returns a display-message id to store on the
+        checkout for later clearing, or None if the adapter uses no id (e.g.
+        DataTransfer)."""
+        raise NotImplementedError
+
+    async def clear_transaction_qr(self, ocpp, evse, *, message_id) -> None:
+        raise NotImplementedError
+
 
 class StandardDisplayAdapter(ChargerDisplayAdapter):
     """OCPP 2.0.1 ``SetDisplayMessage`` with a server-rendered QR image (URI
@@ -93,6 +113,43 @@ class StandardDisplayAdapter(ChargerDisplayAdapter):
         evse.display_message_id = None
         db.add(evse)
         db.commit()
+
+    async def show_transaction_qr(
+        self, ocpp, db, evse, *, payment_url, transaction_id, price, currency
+    ):
+        # Transaction-bound QR: rendered fresh (the url carries the per-session
+        # ?pay= link) and tagged with the transactionId so it stays up for this
+        # session. Not cached like the standing QR.
+        qr_img = qrcode.make(payment_url)
+        buffer = BytesIO()
+        qr_img.save(buffer)
+        buffer.seek(0)
+        image_url = ocpp.fileIntegration.upload_file(
+            buffer,
+            "image/png",
+            f"qrcode_{evse.station_id}_{transaction_id}.png",
+            f"QRCode_{evse.station_id}_{transaction_id}",
+        )
+        next_id = ocpp._next_display_message_id(db, evse.station_id)
+        ocpp.send_citrineos_message(
+            station_id=evse.station_id,
+            tenant_id=evse.tenant_id,
+            url_path="configuration/setDisplayMessage",
+            json_payload={
+                "message": {
+                    "id": next_id,
+                    "priority": "AlwaysFront",
+                    "transactionId": transaction_id,
+                    "message": {"format": "URI", "content": image_url},
+                }
+            },
+        )
+        return next_id
+
+    async def clear_transaction_qr(self, ocpp, evse, *, message_id):
+        if message_id is None:
+            return
+        ocpp._clear_display_message(evse.station_id, evse.tenant_id, message_id)
 
 
 class RenovaDisplayAdapter(ChargerDisplayAdapter):
@@ -159,6 +216,37 @@ class RenovaDisplayAdapter(ChargerDisplayAdapter):
         db.add(evse)
         db.commit()
 
+    async def show_transaction_qr(
+        self, ocpp, db, evse, *, payment_url, transaction_id, price, currency
+    ):
+        # Same DataTransfer as the standing QR, but the url carries the per-session
+        # ?pay= link. The device renders it; there's no display-message id.
+        self._data_transfer(
+            ocpp,
+            evse,
+            {
+                "connector_id": evse.ocpp_evse_id or 1,
+                "evse_id": evse.evse_id or "",
+                "price": float(price) if price is not None else 0.0,
+                "unit": f"{(currency or '').upper()}/kWh",
+                "url": payment_url,
+            },
+        )
+        return None
+
+    async def clear_transaction_qr(self, ocpp, evse, *, message_id):
+        self._data_transfer(
+            ocpp,
+            evse,
+            {
+                "connector_id": evse.ocpp_evse_id or 1,
+                "evse_id": evse.evse_id or "",
+                "price": 0.0,
+                "unit": "",
+                "url": "",
+            },
+        )
+
 
 # Registry: display_adapter_type -> adapter instance. Add new charger families here.
 ADAPTERS = {
@@ -167,9 +255,11 @@ ADAPTERS = {
 }
 DEFAULT_ADAPTER = "standard"
 
-# Auto-detect the display_adapter_type from the CitrineOS BootNotification vendor
-# (ChargingStations.chargePointVendor). Matched case-insensitively. Extend this
-# as more vendors are onboarded; a manually-set display_adapter_type always wins.
+# Maps the CitrineOS BootNotification vendor (ChargingStations.chargePointVendor)
+# to a display_adapter_type, matched case-insensitively. The payment service
+# refreshes each EVSE's display_adapter_type from this on every standing-QR push
+# (status change + catalog sync), so it tracks the charger's reported vendor.
+# Extend this as more vendors are onboarded.
 DISPLAY_ADAPTER_BY_VENDOR = {
     "RCD": "renova",
 }
@@ -177,6 +267,7 @@ DISPLAY_ADAPTER_BY_VENDOR = {
 
 def display_adapter_for_vendor(vendor) -> "str | None":
     """Map a charger's reported vendor to a display_adapter_type, or None."""
+    info(f" [charger_display] vendor={vendor}")
     if not vendor:
         return None
     return DISPLAY_ADAPTER_BY_VENDOR.get(str(vendor).strip().upper())
@@ -186,6 +277,7 @@ def get_display_adapter(evse) -> ChargerDisplayAdapter:
     """Resolve the display adapter for an EVSE from its ``display_adapter_type``
     (falls back to the standard SetDisplayMessage adapter for unknown/unset
     types)."""
+    info(f" [charger_display] evse={evse.evse_id} display_adapter_type={evse.display_adapter_type}")
     adapter_type = (
         getattr(evse, "display_adapter_type", None) or DEFAULT_ADAPTER
     ).lower()

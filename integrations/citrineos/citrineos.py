@@ -1,5 +1,4 @@
 from enum import Enum
-from io import BytesIO
 import json
 from urllib.parse import quote
 from typing import List, Tuple
@@ -13,7 +12,6 @@ import requests
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 import stripe
-import qrcode
 
 from config import Config
 from logging import debug, exception, info, warning
@@ -362,59 +360,25 @@ class CitrineOSIntegration(OcppIntegration):
         )
 
         # Point the QR at the PayServe charger-info page (carrying the Stripe
-        # payment link in the `pay` query param) instead of straight at Stripe,
-        # so the driver sees charger/tariff details and taps "Pay now" before
-        # being sent to the Stripe checkout.
+        # payment link in the `pay` query param) so the driver sees charger/tariff
+        # details and taps "Pay now" before being sent to the Stripe checkout. How
+        # the QR is delivered depends on the charger family (image
+        # SetDisplayMessage vs a Renova DataTransfer) -- routed via the adapter.
         checkout_page_url = (
             f"{Config.CLIENT_URL}/checkout/{evse.evse_id}"
             f"?pay={quote(payment_link_url, safe='')}"
         )
-        qr_code_img = qrcode.make(checkout_page_url)
-        # Save the image to an in-memory buffer
-        buffer = BytesIO()
-        debug(type(qr_code_img))
-        debug(dir(qr_code_img))
-        qr_code_img.save(buffer)
-        buffer.seek(0)  # Rewind the buffer to the beginning
-
-        qr_code_img_url = self.fileIntegration.upload_file(
-            buffer,
-            "image/png",
-            f"qrcode_{stationId}_{transactionId}.png",
-            f"QRCode_{stationId}_{transactionId}",
+        self._resolve_display_adapter_type(db, evse)
+        adapter = get_display_adapter(evse)
+        db_checkout.qr_code_message_id = await adapter.show_transaction_qr(
+            self,
+            db,
+            evse,
+            payment_url=checkout_page_url,
+            transaction_id=transactionId,
+            price=tariff.price_kwh,
+            currency=tariff.currency,
         )
-
-        mostRecentMessageInfoForStation = (
-            db.query(MessageInfoModel)
-            .filter(MessageInfoModel.stationId == stationId)
-            .order_by(MessageInfoModel.id.desc())
-            .first()
-        )
-        nextMessageId = (
-            0
-            if mostRecentMessageInfoForStation is None
-            else mostRecentMessageInfoForStation.id + 1
-        )
-        set_display_message_request = {
-            "message": {
-                "id": nextMessageId,
-                "priority": "AlwaysFront",
-                "transactionId": transactionId,
-                "message": {"format": "URI", "content": qr_code_img_url},
-            }
-        }
-        citrineos_module = (
-            "configuration"  # TODO set up programatic way to resolve module from action
-        )
-        action = "setDisplayMessage"
-
-        self.send_citrineos_message(
-            station_id=stationId,
-            tenant_id=evse.tenant_id,
-            url_path=f"{citrineos_module}/{action}",
-            json_payload=set_display_message_request,
-        )
-        db_checkout.qr_code_message_id = nextMessageId
         db.add(db_checkout)
         db.commit()
 

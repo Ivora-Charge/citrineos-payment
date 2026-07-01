@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from config import Config
 from db.init_db import Connector, Evse, Transaction, get_db, Checkout as CheckoutModel
+from integrations.charger_display import get_display_adapter
 from integrations.integration import OcppIntegration
 from schemas.checkouts import RequestStartStopStatusEnumType
 
@@ -268,11 +269,11 @@ async def handle_scan_and_charge(
     db.add(db_checkout)
     db.commit()
 
-    ocpp_integration.send_citrineos_message(
-        station_id=stationId,
-        tenant_id=db_evse.tenant_id,
-        url_path="configuration/clearDisplayMessage",
-        json_payload={"id": db_checkout.qr_code_message_id},
+    # Take the scan-and-charge QR down via the same adapter that showed it (a
+    # SetDisplayMessage clear for standard chargers, a DataTransfer for Renova).
+    adapter = get_display_adapter(db_evse)
+    await adapter.clear_transaction_qr(
+        ocpp_integration, db_evse, message_id=db_checkout.qr_code_message_id
     )
 
 
