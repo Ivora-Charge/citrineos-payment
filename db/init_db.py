@@ -143,6 +143,12 @@ class Checkout(Base):
     # When the hold was captured. Doubles as the idempotency guard (a second
     # Ended event / reaper pass skips already-settled checkouts).
     captured_at = Column(DateTime(timezone=True))
+    # What was actually collected, in currency subunits (cents): the captured
+    # part of the hold, and the separate off-session overage charge. Together
+    # they are this checkout's realized revenue -- the dashboards sum these
+    # instead of round-tripping to Stripe.
+    captured_amount = Column(Integer)
+    overage_amount = Column(Integer)
     authorization_amount = Column(
         Float,
     )
@@ -291,6 +297,18 @@ def init_db() -> None:
             text(
                 f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
                 "ADD COLUMN IF NOT EXISTS captured_at TIMESTAMPTZ"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
+                "ADD COLUMN IF NOT EXISTS captured_amount INTEGER"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
+                "ADD COLUMN IF NOT EXISTS overage_amount INTEGER"
             )
         )
 

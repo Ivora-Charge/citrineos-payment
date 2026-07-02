@@ -121,6 +121,7 @@ class OcppIntegration:
 
         info(f"CAPTURE SUCCESS - Captured the costs for Checkout: {db_checkout.id}")
         db_checkout.captured_at = datetime.now(timezone.utc)
+        db_checkout.captured_amount = int(amount_to_capture)
         db.add(db_checkout)
         db.commit()
 
@@ -176,6 +177,8 @@ class OcppIntegration:
                 **stripe_account_kwargs(db_operator.stripe_account_id),
             )
             db_checkout.overage_payment_intent_id = overage_intent.id
+            if overage_intent.status == "succeeded":
+                db_checkout.overage_amount = int(overage_subunits)
             db.add(db_checkout)
             db.commit()
             info(

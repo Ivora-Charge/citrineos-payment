@@ -52,43 +52,49 @@ async def reaper_loop(ocpp_integration) -> None:
 
 
 async def _reap_once(ocpp_integration) -> None:
+    # Close the session before sleeping: a session held across the sleep sits
+    # "idle in transaction" and blocks any DDL (and everything queued behind
+    # it) for the whole interval.
     db: Session = next(get_db())
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=Config.REAPER_STALE_HOURS)
-    stuck = (
-        db.query(Checkout)
-        .filter(
-            Checkout.payment_intent_id.isnot(None),
-            Checkout.captured_at.is_(None),
-            Checkout.transaction_end_time.is_(None),
-            Checkout.transaction_start_time.isnot(None),
-            Checkout.transaction_start_time < cutoff,
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=Config.REAPER_STALE_HOURS)
+        stuck = (
+            db.query(Checkout)
+            .filter(
+                Checkout.payment_intent_id.isnot(None),
+                Checkout.captured_at.is_(None),
+                Checkout.transaction_end_time.is_(None),
+                Checkout.transaction_start_time.isnot(None),
+                Checkout.transaction_start_time < cutoff,
+            )
+            .all()
         )
-        .all()
-    )
-    for checkout in stuck:
-        # End basis: the last packet the CSMS recorded for this session (core
-        # Transactions.updatedAt), never the current time.
-        row = db.execute(
-            text(
-                'SELECT "updatedAt" FROM "Transactions" '
-                'WHERE "remoteStartId" = :cid '
-                'OR "transactionId" = :tid '
-                'ORDER BY "updatedAt" DESC LIMIT 1'
-            ),
-            {
-                "cid": checkout.id,
-                "tid": checkout.remote_request_transaction_id or "",
-            },
-        ).first()
-        end_time = row[0] if row and row[0] else checkout.transaction_start_time
-        warning(
-            f" [reaper] settling stuck checkout {checkout.id} "
-            f"(started {checkout.transaction_start_time}, last seen {end_time})"
-        )
-        checkout.transaction_end_time = end_time
-        db.add(checkout)
-        db.commit()
-        await ocpp_integration.capture_payment_transaction(checkout_id=checkout.id)
+        for checkout in stuck:
+            # End basis: the last packet the CSMS recorded for this session
+            # (core Transactions.updatedAt), never the current time.
+            row = db.execute(
+                text(
+                    'SELECT "updatedAt" FROM "Transactions" '
+                    'WHERE "remoteStartId" = :cid '
+                    'OR "transactionId" = :tid '
+                    'ORDER BY "updatedAt" DESC LIMIT 1'
+                ),
+                {
+                    "cid": checkout.id,
+                    "tid": checkout.remote_request_transaction_id or "",
+                },
+            ).first()
+            end_time = row[0] if row and row[0] else checkout.transaction_start_time
+            warning(
+                f" [reaper] settling stuck checkout {checkout.id} "
+                f"(started {checkout.transaction_start_time}, last seen {end_time})"
+            )
+            checkout.transaction_end_time = end_time
+            db.add(checkout)
+            db.commit()
+            await ocpp_integration.capture_payment_transaction(checkout_id=checkout.id)
+    finally:
+        db.close()
 
 
 # station name -> problem string currently alerted on (edge-triggered)
@@ -114,6 +120,13 @@ async def alert_loop() -> None:
 
 def _alert_once() -> None:
     db: Session = next(get_db())
+    try:
+        _scan_and_alert(db)
+    finally:
+        db.close()
+
+
+def _scan_and_alert(db: Session) -> None:
     problems: dict[str, str] = {}
 
     offline = db.execute(
