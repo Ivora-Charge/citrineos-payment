@@ -44,6 +44,7 @@ from schemas.transaction_event import (
 class CitrineOsEventAction(str, Enum):
     TRANSACTIONEVENT = "TransactionEvent"
     STATUSNOTIFICATION = "StatusNotification"
+    BOOTNOTIFICATION = "BootNotification"
 
 
 class CitrineOSevent(BaseModel):
@@ -182,6 +183,15 @@ class CitrineOSIntegration(OcppIntegration):
                     "state": "1",
                     "x-match": "all",
                 },
+                # A rebooted charger has a blank screen but our display
+                # debounce marker (display_message_id) survives in the DB, so
+                # without hearing boots the standing QR would never be
+                # re-sent after a power cycle.
+                {
+                    "action": "BootNotification",
+                    "state": "1",
+                    "x-match": "all",
+                },
             ]
             for arguments in arguments_list:
                 await queue.bind(
@@ -257,6 +267,13 @@ class CitrineOSIntegration(OcppIntegration):
                 )
                 await self.process_status_notification(
                     status_notification=status_notification,
+                    citrine_os_event_headers=citrine_os_event_headers,
+                )
+            elif citrine_os_event.action == CitrineOsEventAction.BOOTNOTIFICATION:
+                citrine_os_event_headers = CitrineOSeventHeaders(
+                    **event_message.headers
+                )
+                await self.process_boot_notification(
                     citrine_os_event_headers=citrine_os_event_headers,
                 )
         except ValidationError as e:
@@ -767,6 +784,38 @@ class CitrineOSIntegration(OcppIntegration):
                 new_type,
                 vendor,
             )
+
+    async def process_boot_notification(
+        self,
+        citrine_os_event_headers: CitrineOSeventHeaders,
+    ) -> None:
+        """A rebooted charger comes back with a blank screen, but our display
+        debounce marker (display_message_id) survives in the DB -- so forget
+        the marker and re-push the standing QR for every payable connector of
+        the station. Best-effort: display problems must not affect boots."""
+        db: Session = next(get_db())
+        evses = (
+            db.query(EvseModel)
+            .filter(EvseModel.station_id == citrine_os_event_headers.stationId)
+            .all()
+        )
+        for db_evse in evses:
+            try:
+                db_evse.display_message_id = None
+                db.add(db_evse)
+                db.commit()
+                if db_evse.status in ("Available", "Occupied"):
+                    await self.push_standing_qr(db, db_evse)
+                    info(
+                        f" [CitrineOS] Boot: standing QR re-pushed to "
+                        f"{db_evse.evse_id}"
+                    )
+            except Exception as e:
+                exception(
+                    " [CitrineOS] Boot-time standing-QR push failed: %r",
+                    e.__str__(),
+                )
+        return
 
     async def process_status_notification(
         self,
