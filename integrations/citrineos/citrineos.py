@@ -288,7 +288,15 @@ class CitrineOSIntegration(OcppIntegration):
                     e.errors(),
                 )
             else:
-                raise e
+                # e.g. an OCPP 1.6 charger's StatusNotification (status/
+                # connectorId instead of connectorStatus/evseId). Skip the
+                # event instead of re-raising: an unparseable message must
+                # never bounce the consumer loop and stall ALL stations.
+                warning(
+                    " [CitrineOS] Skipping event with unsupported payload shape"
+                    " (OCPP 1.6 charger?): %r",
+                    e.errors(),
+                )
         except Exception as e:
             exception(" [CitrineOS] Processing error for incoming event: %r", e.__str__)
             raise e
