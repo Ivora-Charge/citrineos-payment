@@ -61,6 +61,20 @@ class AppConfig:
     # checkout to have saved the card (web-portal flow). Off => cap-at-hold.
     OVERAGE_CHARGE_ENABLED: bool = True
 
+    # Stuck-session reaper (tasks/background.py): settle checkouts whose
+    # session has had no end packet for REAPER_STALE_HOURS, using the last
+    # packet the CSMS saw as the end time. Card-not-present holds expire after
+    # ~7 days, so keep the threshold comfortably below that.
+    REAPER_ENABLED: bool = True
+    REAPER_STALE_HOURS: int = 48
+    REAPER_INTERVAL_MINUTES: int = 30
+
+    # Offline/Faulted charger alerting (tasks/background.py). Empty URL =>
+    # disabled. The payload is Slack-compatible: {"text": "..."}.
+    ALERT_WEBHOOK_URL: str = ""
+    ALERT_OFFLINE_MINUTES: int = 10
+    ALERT_INTERVAL_MINUTES: int = 5
+
     # Dev-only convenience: when AUTO_SEED=true the startup hook in main.py seeds
     # one catalog chain from the SEED_* values below (same upsert as seed.py and
     # the /catalog/sync API). Leave off in any shared/prod environment -- the

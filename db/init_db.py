@@ -140,6 +140,9 @@ class Checkout(Base):
     # (the overage charge). NULL until/unless an overage is charged; set so a
     # duplicate Ended event can't double-charge.
     overage_payment_intent_id = Column(String(255))
+    # When the hold was captured. Doubles as the idempotency guard (a second
+    # Ended event / reaper pass skips already-settled checkouts).
+    captured_at = Column(DateTime(timezone=True))
     authorization_amount = Column(
         Float,
     )
@@ -282,6 +285,12 @@ def init_db() -> None:
             text(
                 f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
                 "ADD COLUMN IF NOT EXISTS overage_payment_intent_id VARCHAR(255)"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
+                "ADD COLUMN IF NOT EXISTS captured_at TIMESTAMPTZ"
             )
         )
 

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from io import BytesIO
 from logging import error, info, warning
 from typing import List, Tuple
@@ -32,6 +33,17 @@ class OcppIntegration:
         if db_checkout is None:
             error(
                 f" [integrations] CAPTURE ERROR - Could not find Checkout: {checkout_id}"
+            )
+            return
+
+        # Idempotency: a duplicate Ended event (or a reaper pass racing the real
+        # end packet) must not capture twice. captured_at is our local marker;
+        # the PaymentIntent status check below covers markers lost to a crash
+        # between capture and commit.
+        if db_checkout.captured_at is not None:
+            info(
+                f" [integrations] Checkout {checkout_id} already captured at "
+                f"{db_checkout.captured_at}; skipping."
             )
             return
 
@@ -77,6 +89,24 @@ class OcppIntegration:
             )
             amount_to_capture = int(db_checkout.authorization_amount)
 
+        # Only a hold in requires_capture can be captured; anything else means
+        # it was already settled or cancelled (e.g. by a previous run whose DB
+        # marker didn't commit).
+        intent = stripe.PaymentIntent.retrieve(
+            db_checkout.payment_intent_id,
+            **stripe_account_kwargs(db_operator.stripe_account_id),
+        )
+        if intent.status != "requires_capture":
+            warning(
+                f" [integrations] Checkout {db_checkout.id}: PaymentIntent "
+                f"{db_checkout.payment_intent_id} is '{intent.status}', not "
+                "'requires_capture'; marking settled without capturing."
+            )
+            db_checkout.captured_at = datetime.now(timezone.utc)
+            db.add(db_checkout)
+            db.commit()
+            return
+
         suc_intent = stripe.PaymentIntent.capture(
             intent=db_checkout.payment_intent_id,
             amount_to_capture=amount_to_capture,
@@ -90,6 +120,9 @@ class OcppIntegration:
             return
 
         info(f"CAPTURE SUCCESS - Captured the costs for Checkout: {db_checkout.id}")
+        db_checkout.captured_at = datetime.now(timezone.utc)
+        db.add(db_checkout)
+        db.commit()
 
         # Overage: the hold was the ceiling on what the capture could collect, so
         # bill the remainder as a second off-session charge on the saved card.

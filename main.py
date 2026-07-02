@@ -15,6 +15,7 @@ import stripe
 from db.init_db import init_db, SessionLocal
 from catalog.sync import upsert_payment_catalog
 from integrations.integration import FileIntegration, OcppIntegration
+from tasks.background import alert_loop, reaper_loop
 from logging import error, info
 
 basicConfig(format=Config.LOG_FORMAT, level=Config.LOG_LEVEL)
@@ -95,6 +96,10 @@ async def startup_event():
     app.state.event_consumer_task = loop.create_task(
         coro=ocpp_integration.receive_events()
     )
+    # Fleet background loops (Phase 7): stuck-session reaper + offline/fault
+    # alerting. Same strong-reference rationale as above.
+    app.state.reaper_task = loop.create_task(coro=reaper_loop(ocpp_integration))
+    app.state.alert_task = loop.create_task(coro=alert_loop())
 
 
 """ Add the API router to the web app """
