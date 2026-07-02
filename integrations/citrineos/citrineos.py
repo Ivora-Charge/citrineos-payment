@@ -19,6 +19,7 @@ from db.init_db import (
     MessageInfo as MessageInfoModel,
     get_db,
     Checkout as CheckoutModel,
+    Connector as ConnectorModel,
     Evse as EvseModel,
     Location as LocationModel,
     Tariff as TariffModel,
@@ -314,6 +315,25 @@ class CitrineOSIntegration(OcppIntegration):
         if evse is None:
             raise Exception("EVSE not found")
 
+        # Prepayment policy: charging must never run before payment. Chargers
+        # are provisioned with TxStartPoint=Authorized so this handler should
+        # not fire at all; if a mis-provisioned charger starts an unauthorized
+        # session anyway, stop it right away. The driver pays via the standing
+        # QR, and the paid RequestStartTransaction starts the real session.
+        if Config.SCAN_AND_CHARGE_REQUIRE_PREPAYMENT:
+            warning(
+                f" [CitrineOS] Unauthorized session {transactionId} on "
+                f"{stationId}: prepayment required -- stopping it. Check the "
+                "charger's TxStartPoint provisioning."
+            )
+            self.send_citrineos_message(
+                station_id=stationId,
+                tenant_id=evse.tenant_id,
+                url_path="evdriver/requestStopTransaction",
+                json_payload={"transactionId": transactionId},
+            )
+            return
+
         tariff = (
             db.query(TariffModel)
             .filter(TariffModel.id == evse.connectors[0].tariff_id)
@@ -490,6 +510,25 @@ class CitrineOSIntegration(OcppIntegration):
         db.add(db_checkout)
         db.commit()
         db.refresh(db_checkout)
+
+        # The paid session is running: take the standing "scan to pay" QR down
+        # so nobody scans/pays for a connector that is already charging. It is
+        # re-pushed when the connector returns to Available/Occupied.
+        try:
+            db_connector = (
+                db.query(ConnectorModel)
+                .filter(ConnectorModel.id == db_checkout.connector_id)
+                .first()
+            )
+            db_evse = (
+                db.query(EvseModel).filter(EvseModel.id == db_connector.evse_id).first()
+                if db_connector
+                else None
+            )
+            if db_evse is not None and db_evse.display_message_id is not None:
+                await self.clear_standing_qr(db, db_evse)
+        except Exception as e:
+            exception(" [CitrineOS] Standing-QR clear failed: %r", e.__str__())
         return
 
     def find_checkout_for_event(
@@ -754,19 +793,22 @@ class CitrineOSIntegration(OcppIntegration):
         db.commit()
         db.refresh(db_evse)
 
-        # Standing "scan to pay" QR: show it when the connector is Available (idle)
-        # and clear it when it's in use / unavailable. Only act on a transition (or
-        # a first-time display) so we don't re-push on every repeated
-        # StatusNotification. Best-effort -- a display failure must not break status
-        # tracking.
-        available = "Available"
+        # Standing "scan to pay" QR: with prepayment enforced the driver plugs
+        # in FIRST and then pays, so the QR must stay up while the connector is
+        # Occupied-but-unpaid, not just while Available. It is cleared when the
+        # paid (or RFID) session actually starts -- see
+        # process_transaction_started_remote -- and for Faulted/Unavailable/
+        # Reserved states here. Only act on a transition (or a first-time
+        # display) so we don't re-push on every repeated StatusNotification.
+        # Best-effort -- a display failure must not break status tracking.
+        qr_states = ("Available", "Occupied")
         try:
-            if db_evse.status == available and (
-                previous_status != available or db_evse.display_message_id is None
+            if db_evse.status in qr_states and (
+                previous_status not in qr_states or db_evse.display_message_id is None
             ):
                 await self.push_standing_qr(db, db_evse)
             elif (
-                db_evse.status != available
+                db_evse.status not in qr_states
                 and db_evse.display_message_id is not None
             ):
                 await self.clear_standing_qr(db, db_evse)

@@ -61,6 +61,15 @@ class AppConfig:
     # checkout to have saved the card (web-portal flow). Off => cap-at-hold.
     OVERAGE_CHARGE_ENABLED: bool = True
 
+    # Payment must be made BEFORE charging starts. Chargers are provisioned
+    # with TxStartPoint=Authorized (plug-in only occupies the connector; the
+    # driver pays via the standing QR and the resulting RequestStartTransaction
+    # begins the session). This flag is the CSMS-side safety net: if a
+    # mis-provisioned charger starts an unauthorized session anyway, it is
+    # stopped immediately instead of charging for free. False restores the
+    # legacy pay-while-charging flow (transaction QR + PaymentLink).
+    SCAN_AND_CHARGE_REQUIRE_PREPAYMENT: bool = True
+
     # Stuck-session reaper (tasks/background.py): settle checkouts whose
     # session has had no end packet for REAPER_STALE_HOURS, using the last
     # packet the CSMS saw as the end time. Card-not-present holds expire after
