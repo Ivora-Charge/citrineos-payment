@@ -42,6 +42,11 @@ class ConnectStatusResponse(BaseModel):
     stripe_account_id: Optional[str] = None
     charges_enabled: bool = False
     details_submitted: bool = False
+    # Why charges are still disabled (e.g. "requirements.past_due") and what
+    # Stripe wants next (e.g. ["individual.verification.document"]) -- lets
+    # the UI say "action needed: upload ID" instead of a vague "reviewing".
+    disabled_reason: Optional[str] = None
+    requirements_due: list[str] = []
 
 
 def _tenant_account_id(db: Session, tenant_id: int) -> Optional[str]:
@@ -109,8 +114,16 @@ async def connect_status(tenant_id: int, db: Session = Depends(get_db)):
     if not account_id or not account_id.startswith("acct_"):
         return ConnectStatusResponse(stripe_account_id=account_id)
     account = stripe.Account.retrieve(account_id)
+    requirements = account.get("requirements") or {}
     return ConnectStatusResponse(
         stripe_account_id=account_id,
         charges_enabled=bool(account.get("charges_enabled")),
         details_submitted=bool(account.get("details_submitted")),
+        disabled_reason=requirements.get("disabled_reason"),
+        requirements_due=list(
+            dict.fromkeys(
+                (requirements.get("past_due") or [])
+                + (requirements.get("currently_due") or [])
+            )
+        ),
     )
