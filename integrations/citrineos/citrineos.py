@@ -338,26 +338,43 @@ class CitrineOSIntegration(OcppIntegration):
         db.commit()
         db.refresh(db_checkout)
 
-        if tariff.stripe_price_id is None:
-            price = stripe.Price.create(
-                currency=tariff.currency.lower(),
-                metadata={"tariffId": tariff.id},
-                product_data={"name": "Charging Session Authorization Amount"},
-                tax_behavior="inclusive",
-                unit_amount=int(tariff.authorization_amount * 100),
+        stripe_account_id = location.operator.stripe_account_id
+        self._ensure_stripe_price(db, tariff, stripe_account_id)
+
+        try:
+            payment_link_url = await self.create_payment_link(
+                stripe_price_id=tariff.stripe_price_id,
+                stripe_account_id=stripe_account_id,
+                stationId=stationId,
+                evseId=evse.evse_id,
+                transactionId=transactionId,
+                checkoutId=db_checkout.id,
             )
-            tariff.stripe_price_id = price.id
+        except stripe.error.InvalidRequestError as e:
+            # Stripe Prices are account-scoped: a cached stripe_price_id goes
+            # stale when the operator's account changes (dev 'platform' -> a
+            # real Connect account, or a charger claimed into another tenant).
+            # Heal by recreating the Price on the current account and retrying
+            # once instead of dropping the whole checkout/QR.
+            if "No such price" not in str(e):
+                raise
+            warning(
+                f" [CitrineOS] Tariff {tariff.id}: price "
+                f"{tariff.stripe_price_id} not found on account "
+                f"{stripe_account_id!r}; recreating."
+            )
+            tariff.stripe_price_id = None
             db.add(tariff)
             db.commit()
-
-        payment_link_url = await self.create_payment_link(
-            stripe_price_id=tariff.stripe_price_id,
-            stripe_account_id=location.operator.stripe_account_id,
-            stationId=stationId,
-            evseId=evse.evse_id,
-            transactionId=transactionId,
-            checkoutId=db_checkout.id,
-        )
+            self._ensure_stripe_price(db, tariff, stripe_account_id)
+            payment_link_url = await self.create_payment_link(
+                stripe_price_id=tariff.stripe_price_id,
+                stripe_account_id=stripe_account_id,
+                stationId=stationId,
+                evseId=evse.evse_id,
+                transactionId=transactionId,
+                checkoutId=db_checkout.id,
+            )
 
         # Point the QR at the PayServe charger-info page (carrying the Stripe
         # payment link in the `pay` query param) so the driver sees charger/tariff
@@ -380,6 +397,26 @@ class CitrineOSIntegration(OcppIntegration):
             currency=tariff.currency,
         )
         db.add(db_checkout)
+        db.commit()
+
+    def _ensure_stripe_price(self, db: Session, tariff, stripe_account_id) -> None:
+        """Create the tariff's hold Price on the *operator's* Stripe account if
+        it doesn't exist yet. Prices are account-scoped, so this must live on
+        the same account the PaymentLink is created on -- creating it on the
+        platform account while charging on a connected account yields
+        'No such price'."""
+        if tariff.stripe_price_id is not None:
+            return
+        price = stripe.Price.create(
+            currency=tariff.currency.lower(),
+            metadata={"tariffId": tariff.id},
+            product_data={"name": "Charging Session Authorization Amount"},
+            tax_behavior="inclusive",
+            unit_amount=int(tariff.authorization_amount * 100),
+            **stripe_account_kwargs(stripe_account_id),
+        )
+        tariff.stripe_price_id = price.id
+        db.add(tariff)
         db.commit()
 
     async def create_payment_link(

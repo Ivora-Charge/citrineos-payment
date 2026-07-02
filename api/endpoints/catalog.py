@@ -147,3 +147,27 @@ async def sync_station(_: None = Depends(require_sync_secret)):
         status_code=501,
         detail="sync-station not implemented; use POST /catalog/sync",
     )
+
+
+@router.post("/reassign-station")
+async def reassign_station(
+    station_id: str = Query(...),
+    tenant_id: str = Query(...),
+    _: None = Depends(require_sync_secret),
+    db: Session = Depends(get_db),
+):
+    """Point a station's payment EVSEs at a new tenant. Called when a charger
+    is claimed/moved between tenants so revenue attribution and outbound
+    CitrineOS calls (which pass the payment-side tenant) follow the move --
+    a full catalog sync only runs when tariffs are re-synced, which may be
+    much later (or never, for a freshly claimed unit with no tariff yet)."""
+    evses = db.query(EvseModel).filter(EvseModel.station_id == station_id).all()
+    for evse in evses:
+        evse.tenant_id = tenant_id
+        db.add(evse)
+    db.commit()
+    info(
+        f" [catalog] reassigned {len(evses)} EVSE(s) of station {station_id} "
+        f"to tenant {tenant_id}"
+    )
+    return {"updated": len(evses)}
