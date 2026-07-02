@@ -37,25 +37,39 @@ async def stripe_webhook(
     async for chunk in request.stream():
         body += chunk
 
-    # charge.succeed is in connect_event_types, as we are using Stripe Standard accounts
-    # for which the events are coming via the Connect-Webhook.
-    # If we would use Stripe Express accounts, the events would be coming via the Account-Webhook
-    account_event_types = []
-    connect_event_types = ["checkout.session.completed"]
+    # checkout.session.completed arrives via TWO endpoints depending on where
+    # the payment ran: the Connect webhook for payments on a tenant's
+    # connected Standard account (carries a top-level "account" field), and
+    # the plain account webhook for payments on the platform account (dev
+    # 'platform' operators). Each endpoint has its own signing secret, so
+    # verify against the matching one and fall back to the other.
+    handled_event_types = ["checkout.session.completed"]
     try:
-        event_type = loads(body.decode()).get("type")
+        payload = loads(body.decode())
+        event_type = payload.get("type")
         debug(" [*WEBHOOK*] Event type {}".format(event_type))
-        if event_type in account_event_types:
-            event = stripe.Webhook.construct_event(
-                body, STRIPE_SIGNATURE, Config.STRIPE_ENDPOINT_SECRET_ACCOUNT
-            )
-        elif event_type in connect_event_types:
-            event = stripe.Webhook.construct_event(
-                body, STRIPE_SIGNATURE, Config.STRIPE_ENDPOINT_SECRET_CONNECT
-            )
-        else:
+        if event_type not in handled_event_types:
             debug(" [*WEBHOOK*] Unhandled event type {}".format(event_type))
             return {}
+        secrets = [
+            Config.STRIPE_ENDPOINT_SECRET_CONNECT
+            if payload.get("account")
+            else Config.STRIPE_ENDPOINT_SECRET_ACCOUNT,
+            Config.STRIPE_ENDPOINT_SECRET_ACCOUNT
+            if payload.get("account")
+            else Config.STRIPE_ENDPOINT_SECRET_CONNECT,
+        ]
+        last_err: Exception | None = None
+        for secret in dict.fromkeys(secrets):  # dedupe, keep order
+            try:
+                event = stripe.Webhook.construct_event(body, STRIPE_SIGNATURE, secret)
+                break
+            except stripe.error.SignatureVerificationError as e:
+                last_err = e
+        if event is None:
+            raise last_err or stripe.error.SignatureVerificationError(
+                "no matching webhook secret", STRIPE_SIGNATURE
+            )
     except ValueError as e:
         raise e
     except stripe.error.SignatureVerificationError as e:
