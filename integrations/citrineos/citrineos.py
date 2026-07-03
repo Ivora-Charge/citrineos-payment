@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_core import ValidationError
 import requests
-from sqlalchemy import text as sql_text
+from sqlalchemy import func as sql_func, text as sql_text
 from sqlalchemy.orm import Session
 import stripe
 
@@ -717,14 +717,40 @@ class CitrineOSIntegration(OcppIntegration):
 
     def _next_display_message_id(self, db: Session, station_id: str) -> int:
         """Next free OCPP SetDisplayMessage id for a station (ids are unique per
-        station). Mirrors the scan-and-charge id allocation."""
+        station, across all its EVSEs).
+
+        MessageInfos only reflects messages the charger has confirmed/stored,
+        so it lags (or stays empty when a charger never answers
+        SetDisplayMessage). Also count ids we've already handed out locally --
+        the standing QRs on the station's EVSEs and the scan-and-charge QRs on
+        its checkouts -- otherwise two guns pushed back-to-back both get id 0
+        and clearing one takes the other's QR down."""
+        highest = -1
         most_recent = (
             db.query(MessageInfoModel)
             .filter(MessageInfoModel.stationId == station_id)
             .order_by(MessageInfoModel.id.desc())
             .first()
         )
-        return 0 if most_recent is None else most_recent.id + 1
+        if most_recent is not None:
+            highest = max(highest, most_recent.id)
+        evse_max = (
+            db.query(sql_func.max(EvseModel.display_message_id))
+            .filter(EvseModel.station_id == station_id)
+            .scalar()
+        )
+        if evse_max is not None:
+            highest = max(highest, evse_max)
+        checkout_max = (
+            db.query(sql_func.max(CheckoutModel.qr_code_message_id))
+            .join(ConnectorModel, CheckoutModel.connector_id == ConnectorModel.id)
+            .join(EvseModel, ConnectorModel.evse_id == EvseModel.id)
+            .filter(EvseModel.station_id == station_id)
+            .scalar()
+        )
+        if checkout_max is not None:
+            highest = max(highest, checkout_max)
+        return highest + 1
 
     def _clear_display_message(
         self, station_id: str, tenant_id: str, message_id: int

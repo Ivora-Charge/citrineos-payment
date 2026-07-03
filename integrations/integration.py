@@ -107,6 +107,27 @@ class OcppIntegration:
             db.commit()
             return
 
+        # Stripe refuses captures below its minimum charge (amount_too_small,
+        # ~$0.50): a zero- or micro-usage session (e.g. a remote start that hit
+        # EVConnectTimeout without an EV) can never be captured. Cancel the
+        # hold instead so the driver's money is released immediately rather
+        # than lingering until the authorization expires after 7 days.
+        if int(amount_to_capture) < STRIPE_MIN_CHARGE_SUBUNITS:
+            info(
+                f" [integrations] Checkout {db_checkout.id}: final amount "
+                f"{amount_to_capture} is below the Stripe minimum charge; "
+                "cancelling the hold instead of capturing."
+            )
+            stripe.PaymentIntent.cancel(
+                db_checkout.payment_intent_id,
+                **stripe_account_kwargs(db_operator.stripe_account_id),
+            )
+            db_checkout.captured_at = datetime.now(timezone.utc)
+            db_checkout.captured_amount = 0
+            db.add(db_checkout)
+            db.commit()
+            return
+
         suc_intent = stripe.PaymentIntent.capture(
             intent=db_checkout.payment_intent_id,
             amount_to_capture=amount_to_capture,
