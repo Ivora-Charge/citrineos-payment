@@ -109,11 +109,39 @@ class CitrineOSIntegration(OcppIntegration):
             exception(" [CitrineOS] Error while creating authorization: %r", e)
             return
 
+    def _message_api_base(self, station_id: str, tenant_id: str) -> str:
+        """The message API base URL for a station, matching the OCPP version it
+        connected with. The router refuses calls whose version doesn't match the
+        connection subprotocol ("Failed sending call. Requested protocol ..."),
+        so a charger that negotiated ocpp2.1 must be addressed via /ocpp/2.1.
+        Falls back to the configured (2.0.1) URL when the protocol is unknown."""
+        try:
+            db: Session = next(get_db())
+            row = db.execute(
+                sql_text(
+                    'SELECT "protocol" FROM "ChargingStations" '
+                    'WHERE "ocppConnectionName" = :sid AND "tenantId" = :tid '
+                    "LIMIT 1"
+                ),
+                {"sid": station_id, "tid": int(tenant_id)},
+            ).first()
+            protocol = row[0] if row else None
+        except Exception as e:
+            warning(
+                " [CitrineOS] protocol lookup failed for %s: %r",
+                station_id,
+                e.__str__(),
+            )
+            protocol = None
+        if protocol == "ocpp2.1":
+            return f"{Config.CITRINEOS_MESSAGE_API_URL.rsplit('/ocpp/', 1)[0]}/ocpp/2.1"
+        return Config.CITRINEOS_MESSAGE_API_URL
+
     def send_citrineos_message(
         self, station_id: str, tenant_id: str, url_path: str, json_payload: str
     ) -> requests.Response:
         request_url = (
-            f"{Config.CITRINEOS_MESSAGE_API_URL}/{url_path}"
+            f"{self._message_api_base(station_id, tenant_id)}/{url_path}"
             f"?identifier={station_id}"
             f"&tenantId={tenant_id}"
         )
@@ -751,46 +779,50 @@ class CitrineOSIntegration(OcppIntegration):
         await adapter.clear_payment_qr(self, db, evse)
 
     def _station_vendor(self, db: Session, station_id: str, tenant_id: str):
-        """The charger's reported vendor (ChargingStations.chargePointVendor) for
-        a station, or None. Read straight from the shared CitrineOS table."""
+        """The charger's reported vendor (ChargingStations.chargePointVendor)
+        and OCPP connection protocol (e.g. ``ocpp2.0.1``) for a station, as a
+        ``(vendor, protocol)`` tuple (either may be None). Read straight from
+        the shared CitrineOS table."""
         try:
             row = db.execute(
                 sql_text(
-                    'SELECT "chargePointVendor" FROM "ChargingStations" '
+                    'SELECT "chargePointVendor", "protocol" FROM "ChargingStations" '
                     'WHERE "ocppConnectionName" = :sid AND "tenantId" = :tid '
                     "LIMIT 1"
                 ),
                 {"sid": station_id, "tid": int(tenant_id)},
             ).first()
-            return row[0] if row else None
+            return (row[0], row[1]) if row else (None, None)
         except Exception as e:
             warning(
                 " [CitrineOS] charger vendor lookup failed for %s: %r",
                 station_id,
                 e.__str__(),
             )
-            return None
+            return (None, None)
 
     def _resolve_display_adapter_type(self, db: Session, evse: EvseModel) -> None:
         """Keep display_adapter_type in step with the charger's BootNotification
-        vendor. Runs on every standing-QR push -- i.e. on a status change *and*
-        after a catalog sync -- so a vendor change (reflash, swapped unit, edited
-        BootNotification) is picked up automatically, in either direction. When
-        the charger hasn't reported a vendor yet, the current value is left as-is
-        (the next push, once it has booted, will set it)."""
-        vendor = self._station_vendor(db, evse.station_id, evse.tenant_id)
+        vendor and connection protocol. Runs on every standing-QR push -- i.e. on
+        a status change *and* after a catalog sync -- so a vendor or protocol
+        change (reflash, swapped unit, edited BootNotification) is picked up
+        automatically, in either direction. When the charger hasn't reported a
+        vendor yet, the current value is left as-is (the next push, once it has
+        booted, will set it)."""
+        vendor, protocol = self._station_vendor(db, evse.station_id, evse.tenant_id)
         if not vendor:
             return
-        new_type = display_adapter_for_vendor(vendor) or DEFAULT_ADAPTER
+        new_type = display_adapter_for_vendor(vendor, protocol) or DEFAULT_ADAPTER
         if evse.display_adapter_type != new_type:
             evse.display_adapter_type = new_type
             db.add(evse)
             db.commit()
             info(
-                " [CitrineOS] EVSE %s: set display_adapter_type=%r from vendor %r",
+                " [CitrineOS] EVSE %s: set display_adapter_type=%r from vendor %r (%s)",
                 evse.evse_id,
                 new_type,
                 vendor,
+                protocol or "protocol unknown",
             )
 
     async def process_boot_notification(

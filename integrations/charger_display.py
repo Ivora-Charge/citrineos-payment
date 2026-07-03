@@ -151,6 +151,74 @@ class StandardDisplayAdapter(ChargerDisplayAdapter):
             return
         ocpp._clear_display_message(evse.station_id, evse.tenant_id, message_id)
 
+class Renova21DisplayAdapter(ChargerDisplayAdapter):
+    """Renova chargers on OCPP 2.x take the OCPP *2.1* display-message QR
+    format: ``SetDisplayMessage`` with ``format: "QRCODE"`` and the payment
+    *URL* as content -- the charger renders the QR itself, so no image is
+    rendered or uploaded server-side. (QRCODE is not in the 2.0.1 enum; our
+    CitrineOS schemas are extended to pass it through to 2.0.1 connections.)
+    ``price``/``currency`` are unused (the QR encodes only the URL)."""
+
+    async def show_payment_qr(self, ocpp, db, evse, *, payment_url, price, currency):
+        if evse.display_message_id is not None:
+            ocpp._clear_display_message(
+                evse.station_id, evse.tenant_id, evse.display_message_id
+            )
+
+        next_id = ocpp._next_display_message_id(db, evse.station_id)
+        ocpp.send_citrineos_message(
+            station_id=evse.station_id,
+            tenant_id=evse.tenant_id,
+            url_path="configuration/setDisplayMessage",
+            json_payload={
+                "message": {
+                    "id": next_id,
+                    "priority": "AlwaysFront",
+                    "state": "Idle",
+                    "message": {"format": "QRCODE", "content": payment_url},
+                }
+            },
+        )
+        evse.display_message_id = next_id
+        db.add(evse)
+        db.commit()
+
+    async def clear_payment_qr(self, ocpp, db, evse):
+        if evse.display_message_id is None:
+            return
+        ocpp._clear_display_message(
+            evse.station_id, evse.tenant_id, evse.display_message_id
+        )
+        evse.display_message_id = None
+        db.add(evse)
+        db.commit()
+
+    async def show_transaction_qr(
+        self, ocpp, db, evse, *, payment_url, transaction_id, price, currency
+    ):
+        # Transaction-bound QR: the url carries the per-session ?pay= link and
+        # the message is tagged with the transactionId so it stays up for this
+        # session. Same QRCODE format as the standing QR.
+        next_id = ocpp._next_display_message_id(db, evse.station_id)
+        ocpp.send_citrineos_message(
+            station_id=evse.station_id,
+            tenant_id=evse.tenant_id,
+            url_path="configuration/setDisplayMessage",
+            json_payload={
+                "message": {
+                    "id": next_id,
+                    "priority": "AlwaysFront",
+                    "transactionId": transaction_id,
+                    "message": {"format": "QRCODE", "content": payment_url},
+                }
+            },
+        )
+        return next_id
+
+    async def clear_transaction_qr(self, ocpp, evse, *, message_id):
+        if message_id is None:
+            return
+        ocpp._clear_display_message(evse.station_id, evse.tenant_id, message_id)
 
 class RenovaDisplayAdapter(ChargerDisplayAdapter):
     """Renova / Rainbow ("rcd") chargers render the QR from a URL themselves. The
@@ -252,24 +320,40 @@ class RenovaDisplayAdapter(ChargerDisplayAdapter):
 ADAPTERS = {
     "standard": StandardDisplayAdapter(),
     "renova": RenovaDisplayAdapter(),
+    "renova21": Renova21DisplayAdapter(),
 }
 DEFAULT_ADAPTER = "standard"
 
 # Maps the CitrineOS BootNotification vendor (ChargingStations.chargePointVendor)
 # to a display_adapter_type, matched case-insensitively. The payment service
 # refreshes each EVSE's display_adapter_type from this on every standing-QR push
-# (status change + catalog sync), so it tracks the charger's reported vendor.
-# Extend this as more vendors are onboarded.
+# (status change + catalog sync), so it tracks the charger's reported vendor
+# and connection protocol. Extend these as more vendors are onboarded.
+# Renova ("RCD") delivery depends on the OCPP protocol the unit connected
+# with: 2.x units take SetDisplayMessage in the OCPP 2.1 QRCODE format
+# ("renova21"); older/1.6 units take the vendor DataTransfer ("renova").
+# Keys must be UPPERCASE: lookups normalize the reported vendor with .upper().
 DISPLAY_ADAPTER_BY_VENDOR = {
     "RCD": "renova",
+    "RENOVA": "renova",
+}
+DISPLAY_ADAPTER_BY_VENDOR_OCPP2 = {
+    "RCD": "renova21",
+    "RENOVA": "renova21",
 }
 
 
-def display_adapter_for_vendor(vendor) -> "str | None":
-    """Map a charger's reported vendor to a display_adapter_type, or None."""
+def display_adapter_for_vendor(vendor, protocol=None) -> "str | None":
+    """Map a charger's reported vendor (and OCPP connection protocol, e.g.
+    ``ocpp2.0.1``) to a display_adapter_type, or None."""
     if not vendor:
         return None
-    return DISPLAY_ADAPTER_BY_VENDOR.get(str(vendor).strip().upper())
+    key = str(vendor).strip().upper()
+    if protocol and str(protocol).strip().lower().startswith("ocpp2"):
+        adapter = DISPLAY_ADAPTER_BY_VENDOR_OCPP2.get(key)
+        if adapter:
+            return adapter
+    return DISPLAY_ADAPTER_BY_VENDOR.get(key)
 
 
 def get_display_adapter(evse) -> ChargerDisplayAdapter:
