@@ -311,6 +311,39 @@ def init_db() -> None:
                 "ADD COLUMN IF NOT EXISTS overage_amount INTEGER"
             )
         )
+        # Money received per OCPP transaction, joined for the operator UI:
+        # Hasura tracks this view and exposes it as the Transactions.Revenue
+        # relationship (see citrineos-core hasura-metadata). Amounts are in
+        # currency subunits (cents); overage counts only when its second
+        # PaymentIntent was actually created.
+        prefix = Config.DB_TABLE_PREFIX
+        conn.execute(
+            text(
+                f"CREATE OR REPLACE VIEW {prefix}transaction_revenue AS "
+                "SELECT t.id AS transaction_pk, "
+                't."tenantId", '
+                "c.id AS checkout_id, "
+                "c.captured_amount, "
+                "CASE WHEN c.overage_payment_intent_id IS NOT NULL "
+                "THEN c.overage_amount END AS overage_amount, "
+                "(COALESCE(c.captured_amount, 0) "
+                " + COALESCE(CASE WHEN c.overage_payment_intent_id IS NOT NULL "
+                "            THEN c.overage_amount END, 0)) AS total_received, "
+                "upper(tar.currency) AS currency, "
+                "c.captured_at "
+                f"FROM {prefix}checkouts c "
+                f"JOIN {prefix}connectors pc ON pc.id = c.connector_id "
+                f"JOIN {prefix}evses pe ON pe.id = pc.evse_id "
+                f"LEFT JOIN {prefix}tariffs tar ON tar.id = c.tariff_id "
+                'JOIN "ChargingStations" s '
+                "ON s.\"ocppConnectionName\" = pe.station_id "
+                "AND s.\"tenantId\" = pe.tenant_id::int "
+                'JOIN "Transactions" t '
+                "ON t.\"stationId\" = s.id "
+                "AND t.\"transactionId\" = c.remote_request_transaction_id "
+                "WHERE c.remote_request_transaction_id IS NOT NULL"
+            )
+        )
 
 
 # Dependency
