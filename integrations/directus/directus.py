@@ -100,7 +100,11 @@ class DirectusIntegration(FileIntegration):
         self, file: BytesIO, mime_type: str, filename: str, filetitle: str
     ) -> str:
         data = {
-            "filename_disk": filename,
+            # No filename_disk: it names the file on Directus's disk, and a
+            # second upload with the same value (e.g. a regenerated per-EVSE
+            # QR) collides -- Directus 11 answers with a generic 403 FORBIDDEN.
+            # Left unset, Directus stores under a UUID; filename_download
+            # keeps the friendly name.
             "filename_download": filename,
             "title": filetitle,
             "type": mime_type,
@@ -112,4 +116,8 @@ class DirectusIntegration(FileIntegration):
             request_url, data=data, files=files, auth=BearerAuth(self._token)
         )
         response_payload = response.json().get("data")
+        if not response_payload:
+            raise RuntimeError(
+                f"Directus file upload failed ({response.status_code}): {response.text[:200]}"
+            )
         return f"{self.url}/assets/{response_payload['id']}"  # Query params could be added for image transformations, such as width/height
