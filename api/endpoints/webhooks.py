@@ -17,8 +17,9 @@ router = APIRouter()
 
 def citrineos_call_succeeded(response) -> bool:
     """citrineos-core main returns a list of per-station confirmations from the
-    message API where older versions returned a single object."""
-    if response.status_code != 200:
+    message API where older versions returned a single object. None means the
+    call was skipped client-side (e.g. no OCPP 1.6 equivalent)."""
+    if response is None or response.status_code != 200:
         return False
     body = response.json()
     if isinstance(body, list):

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from enum import Enum
 import json
 from urllib.parse import quote
@@ -34,10 +35,15 @@ from integrations.charger_display import (
 from schemas.status_notification import StatusNotificationRequest
 from utils.utils import stripe_account_kwargs
 from schemas.transaction_event import (
+    IdTokenType,
     MeasurandEnumType,
+    MeterValueType,
+    SampledValueType,
     TransactionEventEnumType,
+    TransactionType,
     TriggerReasonEnumType,
     TransactionEventRequest,
+    UnitOfMeasureType,
 )
 
 
@@ -45,6 +51,11 @@ class CitrineOsEventAction(str, Enum):
     TRANSACTIONEVENT = "TransactionEvent"
     STATUSNOTIFICATION = "StatusNotification"
     BOOTNOTIFICATION = "BootNotification"
+    # OCPP 1.6 transaction lifecycle (normalized into synthetic
+    # TransactionEventRequest objects; see the process_ocpp16_* handlers)
+    STARTTRANSACTION = "StartTransaction"
+    STOPTRANSACTION = "StopTransaction"
+    METERVALUES = "MeterValues"
 
 
 class CitrineOSevent(BaseModel):
@@ -135,13 +146,51 @@ class CitrineOSIntegration(OcppIntegration):
             protocol = None
         if protocol == "ocpp2.1":
             return f"{Config.CITRINEOS_MESSAGE_API_URL.rsplit('/ocpp/', 1)[0]}/ocpp/2.1"
+        if protocol == "ocpp1.6":
+            return f"{Config.CITRINEOS_MESSAGE_API_URL.rsplit('/ocpp/', 1)[0]}/ocpp/1.6"
         return Config.CITRINEOS_MESSAGE_API_URL
+
+    def _translate_call_ocpp16(
+        self, url_path: str, json_payload
+    ) -> "tuple[str, object] | None":
+        """Rewrite a 2.0.1-shaped charger call for an OCPP 1.6 station, or
+        None when 1.6 has no equivalent (the router refuses version-mismatched
+        calls, so sending the 2.0.1 form would fail anyway)."""
+        if url_path == "evdriver/requestStartTransaction":
+            id_token = (json_payload or {}).get("idToken") or {}
+            return (
+                "evdriver/remoteStartTransaction",
+                {
+                    "idTag": id_token.get("idToken"),
+                    "connectorId": (json_payload or {}).get("evseId"),
+                },
+            )
+        if url_path == "evdriver/requestStopTransaction":
+            tx = (json_payload or {}).get("transactionId")
+            try:
+                tx = int(tx)
+            except (TypeError, ValueError):
+                pass
+            return ("evdriver/remoteStopTransaction", {"transactionId": tx})
+        if url_path == "configuration/dataTransfer":
+            return (url_path, json_payload)  # DataTransfer exists in 1.6 as-is
+        # SetDisplayMessage & friends have no 1.6 equivalent.
+        warning(
+            " [CitrineOS 1.6] no 1.6 equivalent for %s -- call skipped", url_path
+        )
+        return None
 
     def send_citrineos_message(
         self, station_id: str, tenant_id: str, url_path: str, json_payload: str
-    ) -> requests.Response:
+    ) -> "requests.Response | None":
+        base = self._message_api_base(station_id, tenant_id)
+        if base.endswith("/ocpp/1.6"):
+            translated = self._translate_call_ocpp16(url_path, json_payload)
+            if translated is None:
+                return None
+            url_path, json_payload = translated
         request_url = (
-            f"{self._message_api_base(station_id, tenant_id)}/{url_path}"
+            f"{base}/{url_path}"
             f"?identifier={station_id}"
             f"&tenantId={tenant_id}"
         )
@@ -217,6 +266,24 @@ class CitrineOSIntegration(OcppIntegration):
                 # re-sent after a power cycle.
                 {
                     "action": "BootNotification",
+                    "state": "1",
+                    "x-match": "all",
+                },
+                # OCPP 1.6 chargers speak StartTransaction / StopTransaction /
+                # MeterValues instead of TransactionEvent. They are adapted
+                # into the same session pipeline.
+                {
+                    "action": "StartTransaction",
+                    "state": "1",
+                    "x-match": "all",
+                },
+                {
+                    "action": "StopTransaction",
+                    "state": "1",
+                    "x-match": "all",
+                },
+                {
+                    "action": "MeterValues",
                     "state": "1",
                     "x-match": "all",
                 },
@@ -304,6 +371,27 @@ class CitrineOSIntegration(OcppIntegration):
                 await self.process_boot_notification(
                     citrine_os_event_headers=citrine_os_event_headers,
                 )
+            elif citrine_os_event.action == CitrineOsEventAction.STARTTRANSACTION:
+                await self.process_ocpp16_start(
+                    payload=citrine_os_event.payload,
+                    citrine_os_event_headers=CitrineOSeventHeaders(
+                        **event_message.headers
+                    ),
+                )
+            elif citrine_os_event.action == CitrineOsEventAction.METERVALUES:
+                await self.process_ocpp16_meter_values(
+                    payload=citrine_os_event.payload,
+                    citrine_os_event_headers=CitrineOSeventHeaders(
+                        **event_message.headers
+                    ),
+                )
+            elif citrine_os_event.action == CitrineOsEventAction.STOPTRANSACTION:
+                await self.process_ocpp16_stop(
+                    payload=citrine_os_event.payload,
+                    citrine_os_event_headers=CitrineOSeventHeaders(
+                        **event_message.headers
+                    ),
+                )
         except ValidationError as e:
             if e.title == CitrineOSevent.__name__:
                 debug(
@@ -328,6 +416,283 @@ class CitrineOSIntegration(OcppIntegration):
         except Exception as e:
             exception(" [CitrineOS] Processing error for incoming event: %r", e.__str__)
             raise e
+
+    # ------------------------------------------------------------------
+    # OCPP 1.6 adapters: normalize StartTransaction / MeterValues /
+    # StopTransaction into synthetic TransactionEventRequest objects and feed
+    # them through the exact same session pipeline as OCPP 2.0.1.
+    #
+    # Correlation model: the paid flow starts 1.6 sessions with
+    # idTag = f"{OCPP_REMOTESTART_IDTAG_PREFIX}{checkout_id}" (e.g. PAY_42),
+    # so the Started adapter recovers remoteStartId from the idTag; the
+    # CSMS-assigned integer transactionId (only present in the CSMS *response*,
+    # not the charger request) is read back from the shared Transactions table
+    # and recorded as remote_request_transaction_id for Updated/Ended matching.
+    # ------------------------------------------------------------------
+
+    def _ocpp16_remote_start_id(self, id_tag: "str | None") -> "int | None":
+        """checkout id encoded in a payment idTag (PAY_<id>), else None."""
+        prefix = Config.OCPP_REMOTESTART_IDTAG_PREFIX
+        if id_tag and prefix and id_tag.startswith(prefix):
+            suffix = id_tag[len(prefix) :]
+            if suffix.isdigit():
+                return int(suffix)
+        return None
+
+    async def _ocpp16_active_transaction_id(
+        self, station_id: str, tenant_id: int = 1, attempts: int = 4
+    ) -> "str | None":
+        """The CSMS-assigned transactionId of the station's active transaction.
+
+        The 1.6 StartTransaction *request* has no transactionId (the CSMS
+        assigns one in the response), so read it back from the shared
+        Transactions table. The row is written by the CitrineOS transactions
+        module around the same time this event is consumed, hence the short
+        retry. Single-connector assumption: takes the newest active row for
+        the station (fine for the 1.6 units we target; multi-connector 1.6
+        needs response-correlation instead)."""
+        for attempt in range(attempts):
+            try:
+                db: Session = next(get_db())
+                row = db.execute(
+                    sql_text(
+                        'SELECT t."transactionId" FROM "Transactions" t '
+                        'JOIN "ChargingStations" cs ON t."stationId" = cs."id" '
+                        'WHERE cs."ocppConnectionName" = :sid '
+                        'AND cs."tenantId" = :tid AND t."isActive" IS TRUE '
+                        'ORDER BY t."createdAt" DESC LIMIT 1'
+                    ),
+                    {"sid": station_id, "tid": int(tenant_id)},
+                ).first()
+                if row and row[0] is not None:
+                    return str(row[0])
+            except Exception as e:
+                warning(
+                    " [CitrineOS 1.6] transaction lookup failed for %s: %r",
+                    station_id,
+                    e.__str__(),
+                )
+            await asyncio.sleep(0.5 * (attempt + 1))
+        return None
+
+    def _map_ocpp16_meter_values(
+        self, meter_values: "list | None"
+    ) -> "list[MeterValueType] | None":
+        """1.6 meterValue[] -> 2.0.1 MeterValueType[] (string values become
+        floats, bare `unit` becomes unitOfMeasure, unmappable samples are
+        skipped instead of failing the event)."""
+        if not meter_values:
+            return None
+        mapped = []
+        for mv in meter_values:
+            samples = []
+            for sv in mv.get("sampledValue", []):
+                try:
+                    unit = sv.get("unit")
+                    samples.append(
+                        SampledValueType(
+                            value=float(sv["value"]),
+                            measurand=sv.get(
+                                "measurand", "Energy.Active.Import.Register"
+                            ),
+                            phase=sv.get("phase"),
+                            unitOfMeasure=(
+                                UnitOfMeasureType(unit=unit, multiplier=0)
+                                if unit
+                                else None
+                            ),
+                        )
+                    )
+                except Exception:
+                    debug(" [CitrineOS 1.6] skipping unmappable sample: %r", sv)
+            if samples:
+                mapped.append(MeterValueType(sampledValue=samples))
+        return mapped or None
+
+    def _ocpp16_energy_meter_value(self, wh_value) -> "list[MeterValueType]":
+        """A single Energy.Active.Import.Register reading (1.6 meterStart /
+        meterStop are plain Wh integers) as a 2.0.1 meterValue list."""
+        return [
+            MeterValueType(
+                sampledValue=[
+                    SampledValueType(
+                        value=float(wh_value),
+                        measurand=MeasurandEnumType.EnergyActiveImportRegister,
+                        unitOfMeasure=UnitOfMeasureType(unit="Wh", multiplier=0),
+                    )
+                ]
+            )
+        ]
+
+    async def process_ocpp16_start(
+        self, payload: dict, citrine_os_event_headers: CitrineOSeventHeaders
+    ) -> None:
+        station_id = citrine_os_event_headers.stationId
+        id_tag = payload.get("idTag")
+        remote_start_id = self._ocpp16_remote_start_id(id_tag)
+        if remote_start_id is None and id_tag:
+            # Plain RFID session: no checkout will ever match, so don't stall
+            # the (serial) consumer on the transaction-id read-back at all.
+            debug(
+                " [CitrineOS 1.6] RFID StartTransaction on %s (idTag=%r) "
+                "-- not a payment session, skipping",
+                station_id,
+                id_tag,
+            )
+            return
+        transaction_id = await self._ocpp16_active_transaction_id(station_id)
+        if transaction_id is None and remote_start_id is None:
+            # No idTag AND no active transaction row: the CSMS rejected the
+            # session (1.6 validates strictly), nothing to guard or bill.
+            info(
+                " [CitrineOS 1.6] no active transaction for StartTransaction "
+                "on %s (idTag=%r) -- skipping",
+                station_id,
+                id_tag,
+            )
+            return
+        if transaction_id is None:
+            # Paid session whose CSMS transaction row wasn't visible yet
+            # (read-back raced the CSMS write, ~3% under concurrent starts).
+            # Proceed WITHOUT the id: the checkout still binds via
+            # remoteStartId, and the id is late-bound from the first
+            # MeterValues/StopTransaction (see _late_bind_ocpp16).
+            warning(
+                " [CitrineOS 1.6] paid StartTransaction on %s (checkout %s): "
+                "transaction id not visible yet -- will late-bind from the "
+                "next meter/stop event",
+                station_id,
+                remote_start_id,
+            )
+        synthetic = TransactionEventRequest(
+            eventType=TransactionEventEnumType.Started,
+            timestamp=payload.get("timestamp"),
+            triggerReason=(
+                TriggerReasonEnumType.RemoteStart
+                if remote_start_id is not None
+                else TriggerReasonEnumType.Authorized
+            ),
+            transactionInfo=TransactionType(
+                transactionId=transaction_id, remoteStartId=remote_start_id
+            ),
+            idToken=(
+                IdTokenType(idToken=id_tag, type="ISO14443") if id_tag else None
+            ),
+            meterValue=(
+                self._ocpp16_energy_meter_value(payload["meterStart"])
+                if payload.get("meterStart") is not None
+                else None
+            ),
+        )
+        await self.process_transaction_started(
+            transaction_event=synthetic,
+            citrine_os_event_headers=citrine_os_event_headers,
+        )
+
+    def _late_bind_ocpp16(self, transaction_id: str, station_id: str) -> None:
+        """Heal a Started event whose CSMS transaction id wasn't visible yet:
+        bind this id to the station's open, id-less, remote-accepted checkout
+        so find_checkout_for_event matches it from here on. No-op when a
+        checkout already knows the id (the normal case)."""
+        try:
+            db: Session = next(get_db())
+            if (
+                db.query(CheckoutModel)
+                .filter(
+                    CheckoutModel.remote_request_transaction_id == transaction_id
+                )
+                .first()
+                is not None
+            ):
+                return
+            candidates = (
+                db.query(CheckoutModel)
+                .join(ConnectorModel, ConnectorModel.id == CheckoutModel.connector_id)
+                .join(EvseModel, EvseModel.id == ConnectorModel.evse_id)
+                .filter(
+                    EvseModel.station_id == station_id,
+                    CheckoutModel.remote_request_status == "Accepted",
+                    CheckoutModel.remote_request_transaction_id.is_(None),
+                    CheckoutModel.transaction_start_time.isnot(None),
+                    CheckoutModel.transaction_end_time.is_(None),
+                    CheckoutModel.captured_at.is_(None),
+                )
+                .order_by(CheckoutModel.id.desc())
+                .limit(2)
+                .all()
+            )
+            if not candidates:
+                return
+            if len(candidates) > 1:
+                warning(
+                    " [CitrineOS 1.6] multiple open checkouts on %s while "
+                    "late-binding transaction %s; binding the newest",
+                    station_id,
+                    transaction_id,
+                )
+            db_checkout = candidates[0]
+            db_checkout.remote_request_transaction_id = transaction_id
+            db.add(db_checkout)
+            db.commit()
+            info(
+                " [CitrineOS 1.6] late-bound transaction %s to checkout %s on %s",
+                transaction_id,
+                db_checkout.id,
+                station_id,
+            )
+        except Exception as e:
+            warning(
+                " [CitrineOS 1.6] late-bind failed for transaction %s on %s: %r",
+                transaction_id,
+                station_id,
+                e.__str__(),
+            )
+
+    async def process_ocpp16_meter_values(
+        self, payload: dict, citrine_os_event_headers: CitrineOSeventHeaders
+    ) -> None:
+        transaction_id = payload.get("transactionId")
+        if transaction_id is None:
+            return  # clock-aligned / non-transaction samples: nothing to bill
+        self._late_bind_ocpp16(
+            str(transaction_id), citrine_os_event_headers.stationId
+        )
+        synthetic = TransactionEventRequest(
+            eventType=TransactionEventEnumType.Updated,
+            timestamp=(payload.get("meterValue") or [{}])[-1].get("timestamp")
+            or datetime.now(timezone.utc),
+            triggerReason=TriggerReasonEnumType.MeterValuePeriodic,
+            transactionInfo=TransactionType(transactionId=str(transaction_id)),
+            meterValue=self._map_ocpp16_meter_values(payload.get("meterValue")),
+        )
+        await self.process_transaction_updated(transaction_event=synthetic)
+
+    async def process_ocpp16_stop(
+        self, payload: dict, citrine_os_event_headers: CitrineOSeventHeaders
+    ) -> None:
+        transaction_id = payload.get("transactionId")
+        if transaction_id is None:
+            return
+        self._late_bind_ocpp16(
+            str(transaction_id), citrine_os_event_headers.stationId
+        )
+        synthetic = TransactionEventRequest(
+            eventType=TransactionEventEnumType.Ended,
+            timestamp=payload.get("timestamp"),
+            triggerReason=TriggerReasonEnumType.EVDeparted,
+            transactionInfo=TransactionType(
+                transactionId=str(transaction_id),
+                # Fallback correlation: StopTransaction may echo the payment
+                # idTag; find_checkout_for_event tries remoteStartId first.
+                remoteStartId=self._ocpp16_remote_start_id(payload.get("idTag")),
+            ),
+            meterValue=(
+                self._ocpp16_energy_meter_value(payload["meterStop"])
+                if payload.get("meterStop") is not None
+                else None
+            ),
+        )
+        await self.process_transaction_ended(transaction_event=synthetic)
 
     async def process_transaction_started(
         self,
@@ -838,7 +1203,16 @@ class CitrineOSIntegration(OcppIntegration):
         vendor, protocol = self._station_vendor(db, evse.station_id, evse.tenant_id)
         if not vendor:
             return
-        new_type = display_adapter_for_vendor(vendor, protocol) or DEFAULT_ADAPTER
+        # Unknown-vendor 1.6 units get the no-op display adapter: 1.6 has no
+        # SetDisplayMessage, so the standard adapter's pushes are refused by
+        # the router (version mismatch). Known 1.6 vendors (Renova) still map
+        # to their DataTransfer adapter via display_adapter_for_vendor.
+        fallback = (
+            "none"
+            if (protocol or "").strip().lower().startswith("ocpp1.6")
+            else DEFAULT_ADAPTER
+        )
+        new_type = display_adapter_for_vendor(vendor, protocol) or fallback
         if evse.display_adapter_type != new_type:
             evse.display_adapter_type = new_type
             db.add(evse)

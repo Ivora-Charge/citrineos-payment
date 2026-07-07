@@ -316,11 +316,45 @@ class RenovaDisplayAdapter(ChargerDisplayAdapter):
         )
 
 
+class NoDisplayAdapter(ChargerDisplayAdapter):
+    """Chargers with no reachable display channel — e.g. generic OCPP 1.6
+    units (1.6 has no SetDisplayMessage and no known vendor DataTransfer for
+    them). The standing QR is expected to be a printed static code: the
+    encoded /checkout/{evse_id} URL is stable per EVSE, so a sticker works.
+    All display operations are no-ops that keep the debounce marker sane."""
+
+    async def show_payment_qr(self, ocpp, db, evse, *, payment_url, price, currency):
+        if evse.display_message_id is None:
+            info(
+                " [charger_display] EVSE %s has no display channel; standing QR"
+                " must be a printed static code for %s",
+                getattr(evse, "evse_id", "?"),
+                payment_url,
+            )
+        evse.display_message_id = SHOWN_SENTINEL
+        db.add(evse)
+        db.commit()
+
+    async def clear_payment_qr(self, ocpp, db, evse):
+        evse.display_message_id = None
+        db.add(evse)
+        db.commit()
+
+    async def show_transaction_qr(
+        self, ocpp, db, evse, *, payment_url, transaction_id, price, currency
+    ):
+        return None
+
+    async def clear_transaction_qr(self, ocpp, evse, *, message_id):
+        return None
+
+
 # Registry: display_adapter_type -> adapter instance. Add new charger families here.
 ADAPTERS = {
     "standard": StandardDisplayAdapter(),
     "renova": RenovaDisplayAdapter(),
     "renova21": Renova21DisplayAdapter(),
+    "none": NoDisplayAdapter(),
 }
 DEFAULT_ADAPTER = "standard"
 

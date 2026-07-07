@@ -34,7 +34,11 @@ class TriggerReasonEnumType(str, Enum):
 
 
 class TransactionType(BaseModel):
-    transactionId: str
+    # Optional: an OCPP 1.6 StartTransaction request has no transactionId (the
+    # CSMS assigns it in the response). A paid 1.6 Started is processed with
+    # transactionId=None when the read-back races the CSMS write; the id is
+    # late-bound from the first MeterValues/StopTransaction that carries it.
+    transactionId: str | None = None
     remoteStartId: int | None = None
 
 
