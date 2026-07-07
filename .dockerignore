@@ -1,6 +1,12 @@
 venv
+.venv
 __pycache__
 .git
 .gitignore
 .gitattributes
 .vscode
+.env
+*.log
+payment.pid
+frontend/node_modules
+frontend/build
