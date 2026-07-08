@@ -89,12 +89,28 @@ def upsert_payment_catalog(
     if connector_id is None:
         connector_id = f"{evse_id}-1"
 
-    operator, operator_created = get_or_create(
-        db,
-        Operator,
-        name=operator_name,
-        defaults={"stripe_account_id": stripe_account_id},
+    # Operators are unique by stripe_account_id (DB constraint), not by name.
+    # Resolve by account first: several tenants may onboard with the shared
+    # 'platform' dev account, and keying on name made the second of them
+    # INSERT a colliding row -> UniqueViolation -> the whole sync 500'd (the
+    # onboarding wizard even suggests 'platform' in its placeholder).
+    operator = (
+        db.query(Operator).filter_by(stripe_account_id=stripe_account_id).first()
     )
+    operator_created = False
+    if operator is None:
+        operator, operator_created = get_or_create(
+            db,
+            Operator,
+            name=operator_name,
+            defaults={"stripe_account_id": stripe_account_id},
+        )
+        if not operator_created and operator.stripe_account_id != stripe_account_id:
+            # Same operator re-onboarded with a new Stripe account (e.g. dev
+            # 'platform' -> real acct_...): follow the new account. Safe: the
+            # lookup above proved no other row holds it.
+            operator.stripe_account_id = stripe_account_id
+            db.add(operator)
 
     location, location_created = get_or_create(
         db,
