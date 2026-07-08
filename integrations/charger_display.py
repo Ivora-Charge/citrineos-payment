@@ -361,33 +361,29 @@ DEFAULT_ADAPTER = "standard"
 # Maps the CitrineOS BootNotification vendor (ChargingStations.chargePointVendor)
 # to a display_adapter_type, matched case-insensitively. The payment service
 # refreshes each EVSE's display_adapter_type from this on every standing-QR push
-# (status change + catalog sync), so it tracks the charger's reported vendor
-# and connection protocol. Extend these as more vendors are onboarded.
-# Renova ("RCD") delivery depends on the OCPP protocol the unit connected
-# with: 2.x units take SetDisplayMessage in the OCPP 2.1 QRCODE format
-# ("renova21"); older/1.6 units take the vendor DataTransfer ("renova").
+# (status change + catalog sync), so it tracks the charger's reported vendor.
+# Extend these as more vendors are onboarded.
+# Renova ("RCD") units ALWAYS use the vendor DataTransfer ("renova") for the QR,
+# on every OCPP version (1.6, 2.0.1, 2.1) -- the firmware renders the QR from the
+# DataTransfer, it does not consume SetDisplayMessage. (DataTransfer is a valid
+# call on all three versions; send_citrineos_message routes it to the station's
+# /ocpp/<ver>.) The SetDisplayMessage-based Renova21DisplayAdapter is retained
+# only for manual override / rollback and is no longer auto-selected.
 # Keys must be UPPERCASE: lookups normalize the reported vendor with .upper().
 DISPLAY_ADAPTER_BY_VENDOR = {
     "RCD": "renova",
     "RENOVA": "renova",
 }
-DISPLAY_ADAPTER_BY_VENDOR_OCPP2 = {
-    "RCD": "renova21",
-    "RENOVA": "renova21",
-}
 
 
 def display_adapter_for_vendor(vendor, protocol=None) -> "str | None":
-    """Map a charger's reported vendor (and OCPP connection protocol, e.g.
-    ``ocpp2.0.1``) to a display_adapter_type, or None."""
+    """Map a charger's reported vendor to a display_adapter_type, or None.
+
+    ``protocol`` is accepted for signature stability but no longer changes the
+    result: Renova/RCD use the DataTransfer adapter on every OCPP version."""
     if not vendor:
         return None
-    key = str(vendor).strip().upper()
-    if protocol and str(protocol).strip().lower().startswith("ocpp2"):
-        adapter = DISPLAY_ADAPTER_BY_VENDOR_OCPP2.get(key)
-        if adapter:
-            return adapter
-    return DISPLAY_ADAPTER_BY_VENDOR.get(key)
+    return DISPLAY_ADAPTER_BY_VENDOR.get(str(vendor).strip().upper())
 
 
 def get_display_adapter(evse) -> ChargerDisplayAdapter:
