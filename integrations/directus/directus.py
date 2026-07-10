@@ -42,7 +42,7 @@ class DirectusIntegration(FileIntegration):
             payload = {"email": self.email, "password": self.password}
             request_url = f"{self.url}/{endpoint}"
 
-            response = requests.post(request_url, json=payload)
+            response = requests.post(request_url, json=payload, timeout=(5, 20))
 
             response_payload = response.json().get("data")
             self._token = response_payload["access_token"]
@@ -65,7 +65,7 @@ class DirectusIntegration(FileIntegration):
             payload = {"refresh_token": self.refresh_token, "mode": "json"}
 
             request_url = f"{self.url}/{endpoint}"
-            response = requests.post(request_url, json=payload)
+            response = requests.post(request_url, json=payload, timeout=(5, 20))
             response_payload = response.json().get("data")
 
             self._token = response_payload["access_token"]
@@ -113,7 +113,11 @@ class DirectusIntegration(FileIntegration):
         files = {"file": (filename, file, mime_type)}
         request_url = f"{self.url}/files"
         response = requests.post(
-            request_url, data=data, files=files, auth=BearerAuth(self._token)
+            request_url,
+            data=data,
+            files=files,
+            auth=BearerAuth(self._token),
+            timeout=(5, 30),
         )
         response_payload = response.json().get("data")
         if not response_payload:

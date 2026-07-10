@@ -197,6 +197,16 @@ async def handle_web_portal(
         db_checkout.id,
         db_checkout.remote_request_status,
     )
+    if remote_start_stop == RequestStartStopStatusEnumType.REJECTED:
+        # No session will ever start for this checkout: release the driver's
+        # pre-auth hold now instead of leaving it dangling until the reaper
+        # (2026-07-08 trial: two paid-but-rejected checkouts kept their holds).
+        warning(
+            " [Stripe] remote start rejected for checkout %s; releasing hold %s",
+            db_checkout.id,
+            paymentIntentId,
+        )
+        cancel_payment_intent(paymentIntentId)
 
 
 async def handle_scan_and_charge(
@@ -283,6 +293,15 @@ async def handle_scan_and_charge(
     db_checkout.payment_intent_id = paymentIntentId
     db.add(db_checkout)
     db.commit()
+    if remote_start_stop == RequestStartStopStatusEnumType.REJECTED:
+        # Same as the web-portal path: a rejected start means no session, so
+        # the driver's hold must be released immediately.
+        warning(
+            " [Stripe] remote start rejected for checkout %s; releasing hold %s",
+            db_checkout.id,
+            paymentIntentId,
+        )
+        cancel_payment_intent(paymentIntentId)
 
     # Take the scan-and-charge QR down via the same adapter that showed it (a
     # SetDisplayMessage clear for standard chargers, a DataTransfer for Renova).

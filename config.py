@@ -77,6 +77,12 @@ class AppConfig:
     REAPER_ENABLED: bool = True
     REAPER_STALE_HOURS: int = 48
     REAPER_INTERVAL_MINUTES: int = 30
+    # Close core OCPP Transactions still flagged isActive after their station
+    # has been offline this long: the charger died mid-session (or was
+    # replaced) and the closing StopTransaction is never coming, so the
+    # operator UI shows the session as "Active" forever. Runs on the reaper
+    # cadence; 0 disables.
+    JANITOR_OFFLINE_HOURS: int = 12
 
     # Offline/Faulted charger alerting (tasks/background.py). Empty URL =>
     # disabled. The payload is Slack-compatible: {"text": "..."}.

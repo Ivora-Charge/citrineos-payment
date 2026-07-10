@@ -48,6 +48,10 @@ async def reaper_loop(ocpp_integration) -> None:
             await _reap_once(ocpp_integration)
         except Exception as e:  # noqa: BLE001 -- keep the loop alive
             error(f" [reaper] iteration failed: {e}")
+        try:
+            _close_hung_transactions()
+        except Exception as e:  # noqa: BLE001
+            error(f" [janitor] iteration failed: {e}")
         await asyncio.sleep(interval)
 
 
@@ -93,6 +97,61 @@ async def _reap_once(ocpp_integration) -> None:
             db.add(checkout)
             db.commit()
             await ocpp_integration.capture_payment_transaction(checkout_id=checkout.id)
+    finally:
+        db.close()
+
+
+def _close_hung_transactions() -> None:
+    """Flip isActive off on core Transactions whose station has been offline
+    longer than JANITOR_OFFLINE_HOURS.
+
+    A charger that dies (or is swapped out) mid-session never sends the
+    closing StopTransaction / TransactionEvent(Ended), and CitrineOS waits
+    forever -- the operator UI shows the session "Active" indefinitely (two
+    June sims still showed active sessions during the 2026-07-08 trial). The
+    money side is unaffected: the reaper settles the attached checkout from
+    its last-seen packet independently, and Transactions.updatedAt is left
+    untouched so that end-basis stays honest. A late StopTransaction from a
+    reconnecting charger still bills normally (checkout matching is by
+    transaction id, not by isActive)."""
+    if Config.JANITOR_OFFLINE_HOURS <= 0:
+        return
+    db: Session = next(get_db())
+    try:
+        closed = db.execute(
+            text(
+                'UPDATE "Transactions" t SET "isActive" = false '
+                'FROM "ChargingStations" cs '
+                'WHERE t."stationId" = cs.id AND t."isActive" IS TRUE '
+                'AND cs."isOnline" = false '
+                "AND cs.\"updatedAt\" < NOW() - (:hrs || ' hours')::interval "
+                'RETURNING t."transactionId", cs."ocppConnectionName"'
+            ),
+            {"hrs": Config.JANITOR_OFFLINE_HOURS},
+        ).fetchall()
+        # Orphans: stationId NULL (station deleted, or the row was created in
+        # the boot/registration race and never attached). No station will ever
+        # close these -- 33 of them sat "Active" from a 2026-07-06 load test.
+        orphaned = db.execute(
+            text(
+                'UPDATE "Transactions" SET "isActive" = false '
+                'WHERE "isActive" IS TRUE AND "stationId" IS NULL '
+                "AND \"updatedAt\" < NOW() - (:hrs || ' hours')::interval "
+                'RETURNING "transactionId"'
+            ),
+            {"hrs": Config.JANITOR_OFFLINE_HOURS},
+        ).fetchall()
+        db.commit()
+        for tx_id, station in closed:
+            warning(
+                f" [janitor] closed hung transaction {tx_id} on {station} "
+                f"(station offline > {Config.JANITOR_OFFLINE_HOURS}h)"
+            )
+        if orphaned:
+            warning(
+                f" [janitor] closed {len(orphaned)} orphaned transaction(s) "
+                f"with no station (deleted or never attached)"
+            )
     finally:
         db.close()
 
