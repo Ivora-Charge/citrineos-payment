@@ -305,9 +305,16 @@ class CitrineOSIntegration(OcppIntegration):
                 },
             ]
             for arguments in arguments_list:
+                # routing_key is ignored by headers exchanges, but aio_pika's
+                # robust-reconnect registry keys restored bindings by
+                # (exchange, routing_key) — with one shared key the six binds
+                # overwrite each other and a broker restart silently restores
+                # ONLY the last one (observed 2026-07-10: after a RabbitMQ
+                # restart the consumer received nothing but MeterValues).
+                # A distinct key per action makes every binding survive.
                 await queue.bind(
                     exchange=exchange,
-                    routing_key="",
+                    routing_key=arguments["action"],
                     arguments=arguments,
                 )
 
