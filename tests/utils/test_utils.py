@@ -26,11 +26,14 @@ class GeneratePricingTests(unittest.TestCase):
                     self.assertEqual(pricing.currency, expected_currency)
 
     def test_pricing_has_tax_rate(self):
-        for tariff, expected_tax_rate in [  # TODO: fix type mismatch
+        for tariff, expected_tax_rate in [
             (a_tariff(tax_rate=1), 1),
             (a_tariff(tax_rate=2), 2),
             (a_tariff(tax_rate=5), 5),
             (a_tariff(tax_rate=23), 23),
+            # Fractional percentage: used to 500 the checkout GET while a
+            # session was live (Pricing declared tax_rate: int).
+            (a_tariff(tax_rate=7.625), 7.625),
         ]:
             with self.subTest(expected_tax_rate=expected_tax_rate):
                 checkout = a_checkout(tariff_id=tariff.id)
@@ -40,11 +43,14 @@ class GeneratePricingTests(unittest.TestCase):
                     self.assertEqual(pricing.tax_rate, expected_tax_rate)
 
     def test_pricing_has_payment_fee(self):
-        for tariff, expected_payment_fee in [  # TODO: fix type mismatch
+        for tariff, expected_payment_fee in [
             (a_tariff(payment_fee=1), 1),
             (a_tariff(payment_fee=2), 2),
             (a_tariff(payment_fee=5), 5),
             (a_tariff(payment_fee=23), 23),
+            # Fractional percentage (e.g. 0.25% processing fee) -- regression
+            # for the int-typed Pricing 500.
+            (a_tariff(payment_fee=0.25), 0.25),
         ]:
             with self.subTest(expected_payment_fee=expected_payment_fee):
                 checkout = a_checkout(tariff_id=tariff.id)

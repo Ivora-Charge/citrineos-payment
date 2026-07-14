@@ -24,8 +24,11 @@ class CheckoutCreateResponse(CheckoutBase):
 
 class Pricing(BaseModel):
     currency: str
-    tax_rate: int
-    payment_fee: int
+    # Percentages -- fractional rates (e.g. tax_rate=7.625, payment_fee=0.25)
+    # are the norm; declaring these int 500'd every checkout GET for tariffs
+    # with fractional rates (2026-07-13, checkout 162).
+    tax_rate: float
+    payment_fee: float
     energy_consumption_kwh: float | None = None
     energy_costs: int | None = None
     time_consumption_min: float | None = None
