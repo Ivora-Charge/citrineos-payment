@@ -1,9 +1,10 @@
 import stripe
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from db.init_db import (
     get_db,
+    Connector as ConnectorModel,
     Evse as EvseModel,
     Tariff as TariffModel,
     Location as LocationModel,
@@ -91,3 +92,47 @@ def get_checkout(id: int, db: Session = Depends(get_db)):
     )
 
     return output_checkout
+
+
+@router.post("/{id}/stop")
+def stop_checkout(id: int, request: Request, db: Session = Depends(get_db)):
+    """Driver-requested remote stop of the checkout's running session.
+
+    Sends RequestStopTransaction (1.6: RemoteStopTransaction) to the station.
+    Settlement is untouched here: the charger's transaction-end event drives
+    the normal capture path, same as unplugging."""
+    db_checkout = db.query(CheckoutModel).filter(CheckoutModel.id == id).first()
+    if db_checkout is None:
+        raise HTTPException(status_code=404, detail="charging.error.sessionnotfound")
+    if (
+        db_checkout.transaction_start_time is None
+        or db_checkout.transaction_end_time is not None
+        or db_checkout.remote_request_transaction_id is None
+    ):
+        raise HTTPException(status_code=409, detail="charging.error.notrunning")
+
+    db_connector = (
+        db.query(ConnectorModel)
+        .filter(ConnectorModel.id == db_checkout.connector_id)
+        .first()
+    )
+    db_evse = (
+        db.query(EvseModel).filter(EvseModel.id == db_connector.evse_id).first()
+        if db_connector
+        else None
+    )
+    if db_evse is None:
+        raise HTTPException(status_code=404, detail="charging.error.sessionnotfound")
+
+    # Local import: webhooks.py is unrelated at import time but shares the app.
+    from api.endpoints.webhooks import citrineos_call_succeeded
+
+    response = request.app.ocpp_integration.send_citrineos_message(
+        station_id=db_evse.station_id,
+        tenant_id=db_evse.tenant_id,
+        url_path="evdriver/requestStopTransaction",
+        json_payload={"transactionId": db_checkout.remote_request_transaction_id},
+    )
+    if not citrineos_call_succeeded(response):
+        raise HTTPException(status_code=502, detail="charging.stop.failed")
+    return {"status": "Accepted"}

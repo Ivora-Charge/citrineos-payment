@@ -1,15 +1,12 @@
 import React from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useIntl } from 'react-intl';
-import { Button, ProgressBar } from 'antd-mobile';
+import { Button, Dialog, ProgressBar, Toast } from 'antd-mobile';
 import moment from 'moment';
 
 import axios from '../util/Api.js';
-import getConnectorPowerKw from '../util/ConnectorCalculatePower.js';
-import { getLocationData } from '../util/getLocationData.js';
 
 export default function Charging() {
-  const [locData, setLocData] = React.useState({});
   const [state, setState] = React.useState({
     status: 'waiting', // (inital: 'waiting' / 'rejected' / 'charging' / 'closed' / 'error' )
     statusMessage: null,
@@ -20,8 +17,11 @@ export default function Charging() {
     transaction_kwh: 0,
     power_active_import: null,
     transaction_soc: null,
+    evseStatus: null,
     initializing: true,
   });
+
+  const [stopping, setStopping] = React.useState(false);
 
   const navigate = useNavigate();
   const intl = useIntl();
@@ -77,6 +77,18 @@ export default function Charging() {
           // Paid & authorized, but charging hasn't begun yet — the driver hasn't
           // plugged in (pay-before-plug) or the charger is still starting up.
           // Keep waiting; the session begins automatically on plug-in.
+          // Fetch the live connector state alongside: once the cable is in,
+          // the EVSE reports 'Occupied' (1.6 "Preparing") and the headline
+          // switches from "plug in" to "Preparing to charge".
+          axios
+            .get(`evses/${evseId}`)
+            .then(({ data: evseData }) => {
+              setState((prevState) => ({
+                ...prevState,
+                evseStatus: evseData.status,
+              }));
+            })
+            .catch(() => {});
           setState((prevState) => ({
             ...prevState,
             status: 'waiting',
@@ -96,22 +108,10 @@ export default function Charging() {
           statusMessage: e.response?.data?.detail,
         }));
       });
-  }, [sessionId, state]);
+  }, [sessionId, evseId, state]);
 
   React.useEffect(() => {
     if (evseId) {
-      // Get EVSE data
-      axios.get(`evses/${evseId}`).then(async ({ data }) => {
-        // Check if location given
-        if (data.id) {
-          const location_data = await getLocationData(data);
-          setLocationData(location_data);
-        } else {
-          // Do sth when location unknown...
-        }
-      });
-
-      // Query session data in parallel
       setSessionData();
     } else {
       // Navigate to home if no location data is given
@@ -124,14 +124,38 @@ export default function Charging() {
     };
   }, [evseId, navigate, setSessionData]); // Ensure setSessionData is stable by using useCallback
 
-  const setLocationData = (location) => {
-    setLocData(location);
-  };
-
   const onRefresh = () => {
     // On manual refresh clear timer and trigger session update which creates new timer
     clearTimeout(refreshTimer.current);
     setSessionData();
+  };
+
+  const onStopCharging = async () => {
+    const confirmed = await Dialog.confirm({
+      content: intl.formatMessage({ id: 'charging.stop.confirm' }),
+      confirmText: intl.formatMessage({ id: 'charging.stop.confirm.yes' }),
+      cancelText: intl.formatMessage({ id: 'charging.stop.confirm.no' }),
+    });
+    if (!confirmed) return;
+    setStopping(true);
+    try {
+      await axios.post(`checkouts/${sessionId}/stop`);
+      Toast.show({
+        content: intl.formatMessage({ id: 'charging.stop.requested' }),
+      });
+      // Poll sooner than the 30s cadence so the page flips to 'closed'
+      // as soon as the charger reports the transaction end.
+      clearTimeout(refreshTimer.current);
+      refreshTimer.current = setTimeout(setSessionData, 5000);
+      // `stopping` stays true: the button remains disabled until the status
+      // leaves 'charging' and the button unmounts with it.
+    } catch (e) {
+      setStopping(false);
+      Toast.show({
+        icon: 'fail',
+        content: intl.formatMessage({ id: 'charging.stop.failed' }),
+      });
+    }
   };
 
   const getFormattedChargingTime = (seconds) => {
@@ -145,23 +169,6 @@ export default function Charging() {
 
   return (
     <div className="page-container" style={{ height: '100%', padding: '15px' }}>
-      {/* Top row */}
-      <div className="checkout-top-container">
-        <div>{evseId}</div>
-        <div>|</div>
-        <div>{locData.power_type}</div>
-        <div>|</div>
-        <div>
-          max.{' '}
-          {getConnectorPowerKw(
-            locData.max_voltage,
-            locData.max_amperage,
-            locData.power_type,
-          )}{' '}
-          kW
-        </div>
-      </div>
-
       {/* Charging Speed */}
       <div className="charge-status">
         <div
@@ -189,9 +196,20 @@ export default function Charging() {
         <div className="charge-status__headline">
           {/* Caption depending on state */}
           {state.status === 'waiting'
-            ? intl.formatMessage({ id: 'charging.authorized.waiting' })
+            ? intl.formatMessage({
+                // Cable already in (EVSE 'Occupied' = 1.6 "Preparing"): the
+                // driver has done their part, so don't keep saying "plug in".
+                id:
+                  state.evseStatus === 'Occupied'
+                    ? 'charging.preparing'
+                    : 'charging.authorized.waiting',
+              })
             : state.status === 'charging'
-              ? `${intl.formatMessage({ id: 'charging.speed' })} ${state.power_active_import !== null ? `: ${state.power_active_import} kW` : ''} `
+              ? !state.power_active_import && !state.transaction_kwh
+                ? // Session started but no energy flowing yet — the charger is
+                  // still negotiating with the car, not actually charging.
+                  intl.formatMessage({ id: 'charging.preparing' })
+                : `${intl.formatMessage({ id: 'charging.speed' })} ${state.power_active_import !== null ? `: ${Number(state.power_active_import).toFixed(2)} kW` : ''} `
               : state.status === 'rejected'
                 ? intl.formatMessage({ id: 'charging.rejected' })
                 : state.status === 'closed'
@@ -214,6 +232,25 @@ export default function Charging() {
             <Button onClick={onRefresh} style={{ marginTop: '20px' }}>
               <i className="ri-refresh-line"></i>{' '}
               {intl.formatMessage({ id: 'charging.refresh' })}
+            </Button>
+          )
+        }
+
+        {
+          /* Stop button only while a session is actually running */
+          state.status === 'charging' && (
+            <Button
+              color="danger"
+              disabled={stopping}
+              onClick={onStopCharging}
+              style={{ marginTop: '10px' }}
+            >
+              <i className="ri-stop-circle-line"></i>{' '}
+              {intl.formatMessage({
+                id: stopping
+                  ? 'charging.stop.requested'
+                  : 'charging.button.stop',
+              })}
             </Button>
           )
         }
@@ -244,7 +281,7 @@ export default function Charging() {
           {/* Energy delivered */}
           <div className="width-100 div-with-margin charging-info-block">
             <div>{intl.formatMessage({ id: 'charging.energy' })}</div>
-            <div>{state.transaction_kwh || 0} kWh</div>
+            <div>{(state.transaction_kwh || 0).toFixed(2)} kWh</div>
           </div>
 
           {/* SoC */}
@@ -252,7 +289,8 @@ export default function Charging() {
             <>
               <div className="width-100 div-with-margin charging-info-block">
                 <div>{intl.formatMessage({ id: 'charging.soc' })}</div>
-                <div>{state.transaction_soc} %</div>
+                {/* toFixed(2) kills float noise; Number() drops trailing zeros (27, 27.5) */}
+                <div>{Number(Number(state.transaction_soc).toFixed(2))} %</div>
               </div>
 
               {/* SoC ProgressBar */}

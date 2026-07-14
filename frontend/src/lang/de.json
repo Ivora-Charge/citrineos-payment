@@ -27,6 +27,7 @@
 
   "charging.speed": "Lädt",
   "charging.authorized.waiting": "Zahlung bestätigt — zum Laden einstecken",
+  "charging.preparing": "Ladevorgang wird vorbereitet…",
   "charging.rejected": "Ladevorgang abgelehnt",
   "charging.finished": "Ladevorgang abgeschlossen",
   "charging.lastupdate": "Letzte Aktualisierung",
@@ -40,6 +41,13 @@
   "charging.refresh": "Aktualisieren",
   "charging.button.again": "Erneut versuchen",
   "charging.error.sessionnotfound": "Es konnte keine Session gefunden werden.",
+  "charging.error.notrunning": "Es läuft kein Ladevorgang, der beendet werden könnte.",
+  "charging.button.stop": "Ladevorgang beenden",
+  "charging.stop.confirm": "Diesen Ladevorgang wirklich beenden?",
+  "charging.stop.confirm.yes": "Beenden",
+  "charging.stop.confirm.no": "Weiter laden",
+  "charging.stop.requested": "Stopp angefordert — wird abgeschlossen…",
+  "charging.stop.failed": "Ladevorgang konnte nicht beendet werden. Bitte erneut versuchen oder an der Ladestation beenden.",
 
   "receipt.sessiondetails": "Session Details",
   "receipt.starttime": "Startzeit",

@@ -27,6 +27,7 @@
 
   "charging.speed": "Charging",
   "charging.authorized.waiting": "Payment confirmed — plug in to start charging",
+  "charging.preparing": "Preparing to charge…",
   "charging.rejected": "Session start rejected by charger",
   "charging.finished": "Session finished",
   "charging.lastupdate": "Last update",
@@ -40,6 +41,13 @@
   "charging.refresh": "Refresh",
   "charging.button.again": "Retry",
   "charging.error.sessionnotfound": "We could not find a session.",
+  "charging.error.notrunning": "There is no running session to stop.",
+  "charging.button.stop": "Stop charging",
+  "charging.stop.confirm": "Stop this charging session?",
+  "charging.stop.confirm.yes": "Stop",
+  "charging.stop.confirm.no": "Keep charging",
+  "charging.stop.requested": "Stop requested — finishing up…",
+  "charging.stop.failed": "Could not stop the session. Please try again, or stop it at the charger.",
 
   "receipt.sessiondetails": "Session details",
   "receipt.starttime": "Start time",
