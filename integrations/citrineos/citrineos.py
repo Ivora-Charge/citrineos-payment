@@ -174,6 +174,9 @@ class CitrineOSIntegration(OcppIntegration):
             return ("evdriver/remoteStopTransaction", {"transactionId": tx})
         if url_path == "configuration/dataTransfer":
             return (url_path, json_payload)  # DataTransfer exists in 1.6 as-is
+        if url_path == "configuration/changeConfiguration":
+            # 1.6-native (no 2.0.1 equivalent); used by the Sinexcel QR adapter.
+            return (url_path, json_payload)
         # SetDisplayMessage & friends have no 1.6 equivalent.
         warning(
             " [CitrineOS 1.6] no 1.6 equivalent for %s -- call skipped", url_path

@@ -316,6 +316,61 @@ class RenovaDisplayAdapter(ChargerDisplayAdapter):
         )
 
 
+class SinexcelDisplayAdapter(ChargerDisplayAdapter):
+    """Sinexcel chargers render the QR from a custom OCPP 1.6 configuration
+    key (vendor doc "How to Set QR-Code by OCPP Command", 06-2025):
+
+        ChangeConfiguration { key: "ChargePointQRCode_<n>", value: <QR content> }
+
+    where n is the connector number (1 = connector A, 2 = connector B) and the
+    value is the raw content the screen encodes as a QR -- we send the checkout
+    page URL, same content as the Renova DataTransfer. 1.6 only: 2.0.1 has no
+    ChangeConfiguration, so display_adapter_for_vendor only selects this
+    adapter for ocpp1.6 stations (2.0.1 Sinexcel units fall back to the
+    standard SetDisplayMessage adapter). Configuration keys persist across
+    reboots, so the standing QR survives a power cycle without a re-push.
+    """
+
+    KEY_TEMPLATE = "ChargePointQRCode_{connector}"
+
+    def _set_qr_key(self, ocpp, evse, value: str) -> None:
+        ocpp.send_citrineos_message(
+            station_id=evse.station_id,
+            tenant_id=evse.tenant_id,
+            url_path="configuration/changeConfiguration",
+            json_payload={
+                "key": self.KEY_TEMPLATE.format(connector=evse.ocpp_evse_id or 1),
+                "value": value,
+            },
+        )
+
+    async def show_payment_qr(self, ocpp, db, evse, *, payment_url, price, currency):
+        self._set_qr_key(ocpp, evse, payment_url)
+        evse.display_message_id = SHOWN_SENTINEL  # config key has no display id
+        db.add(evse)
+        db.commit()
+
+    async def clear_payment_qr(self, ocpp, db, evse):
+        if evse.display_message_id is None:
+            return
+        # Best-effort: write an empty value to take the QR down. Sinexcel's
+        # doc doesn't specify a clear message -- confirm with the vendor.
+        self._set_qr_key(ocpp, evse, "")
+        evse.display_message_id = None
+        db.add(evse)
+        db.commit()
+
+    async def show_transaction_qr(
+        self, ocpp, db, evse, *, payment_url, transaction_id, price, currency
+    ):
+        # Same key as the standing QR, with the per-session ?pay= link.
+        self._set_qr_key(ocpp, evse, payment_url)
+        return None
+
+    async def clear_transaction_qr(self, ocpp, evse, *, message_id):
+        self._set_qr_key(ocpp, evse, "")
+
+
 class NoDisplayAdapter(ChargerDisplayAdapter):
     """Chargers with no reachable display channel — e.g. generic OCPP 1.6
     units (1.6 has no SetDisplayMessage and no known vendor DataTransfer for
@@ -354,6 +409,7 @@ ADAPTERS = {
     "standard": StandardDisplayAdapter(),
     "renova": RenovaDisplayAdapter(),
     "renova21": Renova21DisplayAdapter(),
+    "sinexcel": SinexcelDisplayAdapter(),
     "none": NoDisplayAdapter(),
 }
 DEFAULT_ADAPTER = "standard"
@@ -373,17 +429,27 @@ DEFAULT_ADAPTER = "standard"
 DISPLAY_ADAPTER_BY_VENDOR = {
     "RCD": "renova",
     "RENOVA": "renova",
+    # Verify against the real BootNotification vendor string on first boot.
+    "SINEXCEL": "sinexcel",
 }
 
 
 def display_adapter_for_vendor(vendor, protocol=None) -> "str | None":
     """Map a charger's reported vendor to a display_adapter_type, or None.
 
-    ``protocol`` is accepted for signature stability but no longer changes the
-    result: Renova/RCD use the DataTransfer adapter on every OCPP version."""
+    Renova/RCD use the DataTransfer adapter on every OCPP version. Sinexcel's
+    QR key is a 1.6 ChangeConfiguration, which doesn't exist in 2.0.1+ -- on
+    those protocols a Sinexcel unit falls back to the standard adapter."""
     if not vendor:
         return None
-    return DISPLAY_ADAPTER_BY_VENDOR.get(str(vendor).strip().upper())
+    adapter = DISPLAY_ADAPTER_BY_VENDOR.get(str(vendor).strip().upper())
+    if (
+        adapter == "sinexcel"
+        and protocol
+        and not str(protocol).strip().lower().startswith("ocpp1.6")
+    ):
+        return DEFAULT_ADAPTER
+    return adapter
 
 
 def get_display_adapter(evse) -> ChargerDisplayAdapter:
