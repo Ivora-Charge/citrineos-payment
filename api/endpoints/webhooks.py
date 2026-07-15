@@ -2,7 +2,7 @@ import json
 from uuid import uuid4
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from logging import debug, exception
+from logging import debug, exception, warning
 from json import loads
 from sqlalchemy.orm import Session
 
