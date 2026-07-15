@@ -7,6 +7,7 @@ from api.endpoints.checkouts import router as checkouts_router
 from api.endpoints.webhooks import router as webhooks_router
 from api.endpoints.catalog import router as catalog_router
 from api.endpoints.connect import router as connect_router
+from api.endpoints.ivr import router as ivr_router
 from api.endpoints.stats import router as stats_router
 
 api_router = APIRouter()
@@ -17,4 +18,5 @@ api_router.include_router(checkouts_router, prefix="/checkouts", tags=["checkout
 api_router.include_router(webhooks_router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(catalog_router, prefix="/catalog", tags=["catalog"])
 api_router.include_router(connect_router, prefix="/connect", tags=["connect"])
+api_router.include_router(ivr_router, prefix="/ivr", tags=["ivr"])
 api_router.include_router(stats_router, prefix="/stats", tags=["stats"])

@@ -20,6 +20,7 @@ from db.init_db import (
     Operator,
     Tariff,
 )
+from catalog.phone_codes import ensure_phone_code
 
 # Defaults mirror the historical seed.py values so partial sync payloads keep
 # working exactly like the old manual seed.
@@ -183,6 +184,7 @@ def upsert_payment_catalog(
             "location_id": location.id,
         },
     )
+    ensure_phone_code(db, evse)
 
     connector, connector_created = get_or_create(
         db,

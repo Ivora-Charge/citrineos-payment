@@ -73,6 +73,10 @@ class Evse(Base):
     # OCPP SetDisplayMessage with a rendered image; "renova" => vendor
     # DataTransfer with a URL the device renders itself.
     display_adapter_type = Column(String(32))
+    # Digits the driver keys in on the pay-by-phone IVR to pick this charger.
+    # Network-unique (callers have no tenant context); assigned by
+    # catalog/phone_codes.py and printed on the signage.
+    phone_code = Column(String(8), unique=True, index=True)
 
     connectors = relationship("Connector", back_populates="evse")
 
@@ -154,6 +158,9 @@ class Checkout(Base):
     )
     connector_id = Column(Integer, ForeignKey(f"{Config.DB_TABLE_PREFIX}connectors.id"))
     tariff_id = Column(Integer, ForeignKey(f"{Config.DB_TABLE_PREFIX}tariffs.id"))
+    # Payment channel: 'ivr' for pay-by-phone; NULL for the QR/web flows that
+    # predate the column. Lets reporting split revenue by channel.
+    source = Column(String(8))
     qr_code_message_id = Column(
         Integer,
     )
@@ -289,6 +296,18 @@ def init_db() -> None:
         )
         conn.execute(
             text(
+                f'ALTER TABLE "{evses_table}" '
+                "ADD COLUMN IF NOT EXISTS phone_code VARCHAR(8)"
+            )
+        )
+        conn.execute(
+            text(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS ix_{evses_table}_phone_code "
+                f'ON "{evses_table}" (phone_code)'
+            )
+        )
+        conn.execute(
+            text(
                 f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
                 "ADD COLUMN IF NOT EXISTS overage_payment_intent_id VARCHAR(255)"
             )
@@ -297,6 +316,12 @@ def init_db() -> None:
             text(
                 f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
                 "ADD COLUMN IF NOT EXISTS captured_at TIMESTAMPTZ"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
+                "ADD COLUMN IF NOT EXISTS source VARCHAR(8)"
             )
         )
         conn.execute(
@@ -344,6 +369,17 @@ def init_db() -> None:
                 "WHERE c.remote_request_transaction_id IS NOT NULL"
             )
         )
+
+    # Every EVSE gets a pay-by-phone code (local import: phone_codes imports
+    # the Evse model from this module).
+    from catalog.phone_codes import backfill_phone_codes
+
+    db = SessionLocal()
+    try:
+        backfill_phone_codes(db)
+        db.commit()
+    finally:
+        db.close()
 
 
 # Dependency

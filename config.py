@@ -56,6 +56,31 @@ class AppConfig:
     # so the catalog can never be mutated by an unauthenticated caller.
     PAYMENT_CATALOG_SYNC_SECRET: str = ""
 
+    # Pay-by-phone IVR (api/endpoints/ivr.py), driven by Twilio Programmable
+    # Voice + <Pay>. Empty TWILIO_AUTH_TOKEN => every IVR endpoint fails
+    # closed (503) and the feature is off; card data never touches this
+    # service either way (Twilio captures DTMF digits and tokenizes straight
+    # into Stripe).
+    TWILIO_AUTH_TOKEN: str = ""
+    # Public origin Twilio calls: scheme + host only, no path (e.g.
+    # https://pay.example.com). Twilio signs the URL it requested, and this
+    # service sits behind nginx, so signature validation rebuilds the signed
+    # URL as this origin + the request path/query. Empty => validate against
+    # the URL as received (direct-exposure dev).
+    IVR_PUBLIC_BASE_URL: str = ""
+    # Twilio Pay connector to tokenize with (Console: Voice -> Pay
+    # Connectors) for operators on the PLATFORM Stripe account. Operators
+    # with a real Connect account use the connector named after their
+    # acct_... id (convention: one connector per connected account, so the
+    # token lands on the account that will be charged). Empty => Twilio's
+    # default connector.
+    TWILIO_PAY_CONNECTOR: str = ""
+    # Spoken as the human-assistance option ("press 0") and on failures.
+    # Empty => the option is not offered.
+    IVR_SUPPORT_PHONE: str = ""
+    # Network name spoken in the greeting.
+    IVR_NETWORK_NAME: str = "Ivora"
+
     # When true, settlement bills any cost above the captured hold as a second
     # off-session charge on the saved card (the "overage" charge). Requires the
     # checkout to have saved the card (web-portal flow). Off => cap-at-hold.
