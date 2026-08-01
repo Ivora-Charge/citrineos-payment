@@ -56,6 +56,13 @@ class AppConfig:
     # so the catalog can never be mutated by an unauthenticated caller.
     PAYMENT_CATALOG_SYNC_SECRET: str = ""
 
+    # IANA timezone for the RCD zone_offset_req push (integrations/
+    # rcd_vendor.py). Empty (default) => no push: the AC fw V72.78 stores the
+    # offset but never renders it -- display time comes from the core's
+    # RCD local-currentTime shim instead (OCPP16_RCD_LOCAL_TIME_TZ on
+    # citrine). Set only for firmwares verified to render the offset.
+    CHARGER_DISPLAY_TIMEZONE: str = ""
+
     # Pay-by-phone IVR (api/endpoints/ivr.py), driven by Twilio Programmable
     # Voice + <Pay>. Empty TWILIO_AUTH_TOKEN => every IVR endpoint fails
     # closed (503) and the feature is off; card data never touches this

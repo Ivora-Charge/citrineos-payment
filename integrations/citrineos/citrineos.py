@@ -27,6 +27,7 @@ from db.init_db import (
 )
 
 from integrations.integration import FileIntegration, OcppIntegration
+from integrations import rcd_vendor
 from integrations.charger_display import (
     DEFAULT_ADAPTER,
     display_adapter_for_vendor,
@@ -56,6 +57,8 @@ class CitrineOsEventAction(str, Enum):
     STARTTRANSACTION = "StartTransaction"
     STOPTRANSACTION = "StopTransaction"
     METERVALUES = "MeterValues"
+    # Vendor tunnels (RCD realtime_status / bill; see integrations/rcd_vendor)
+    DATATRANSFER = "DataTransfer"
 
 
 class CitrineOSevent(BaseModel):
@@ -306,6 +309,14 @@ class CitrineOSIntegration(OcppIntegration):
                     "state": "1",
                     "x-match": "all",
                 },
+                # Charger-initiated vendor tunnels (RCD realtime_status/bill
+                # ride DataTransfer). The core still owns the OCPP reply; this
+                # queue only receives a copy of the request.
+                {
+                    "action": "DataTransfer",
+                    "state": "1",
+                    "x-match": "all",
+                },
             ]
             for arguments in arguments_list:
                 # routing_key is ignored by headers exchanges, but aio_pika's
@@ -425,6 +436,14 @@ class CitrineOSIntegration(OcppIntegration):
                     citrine_os_event_headers=CitrineOSeventHeaders(
                         **event_message.headers
                     ),
+                )
+            elif citrine_os_event.action == CitrineOsEventAction.DATATRANSFER:
+                await rcd_vendor.handle_data_transfer(
+                    self,
+                    payload=citrine_os_event.payload,
+                    station_id=CitrineOSeventHeaders(
+                        **event_message.headers
+                    ).stationId,
                 )
         except ValidationError as e:
             if e.title == CitrineOSevent.__name__:
@@ -1435,11 +1454,20 @@ class CitrineOSIntegration(OcppIntegration):
                         f" [CitrineOS] Boot: standing QR re-pushed to "
                         f"{db_evse.evse_id}"
                     )
+                # A rebooted RCD charger may also have stale local pricing
+                # (or none, after a factory reset) -- re-sync the tariff.
+                # push_standing_qr just refreshed display_adapter_type, so
+                # the vendor gate inside is current.
+                await rcd_vendor.push_rates(self, db, db_evse)
             except Exception as e:
                 exception(
                     " [CitrineOS] Boot-time standing-QR push failed: %r",
                     e.__str__(),
                 )
+        # Station-global display timezone: once per boot, not per EVSE (the
+        # firmware refuses the change mid-session, and boot means idle).
+        if evses:
+            await rcd_vendor.push_zone_offset(self, db, evses[0])
         return
 
     async def process_status_notification(

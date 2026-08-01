@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from config import Config
 from db.init_db import Evse as EvseModel, Location as LocationModel, get_db
 from catalog.sync import upsert_payment_catalog
+from integrations import rcd_vendor
 from schemas.catalog import (
     CatalogStatusResponse,
     CatalogSyncRequest,
@@ -93,6 +94,9 @@ async def sync_catalog(
         )
         if evse is not None:
             await ocpp_integration.push_standing_qr(db, evse)
+            # Tariff edits arrive as catalog syncs; keep RCD chargers' local
+            # pricing (screen + offline billing) in step with the new rates.
+            await rcd_vendor.push_rates(ocpp_integration, db, evse)
     except Exception as exc:  # noqa: BLE001 - QR display must not fail the sync
         error(f" [catalog] QR push after sync failed for {payload.evse_id}: {exc}")
 
