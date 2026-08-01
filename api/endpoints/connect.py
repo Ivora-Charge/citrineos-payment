@@ -38,6 +38,28 @@ class OnboardingLinkResponse(BaseModel):
     stripe_account_id: str
 
 
+class ConnectProfile(BaseModel):
+    """Public-profile fields of the connected account, used by operator-ui to
+    prefill the business-information step. Standard accounts expose only
+    business_profile (not the company/individual legal-entity hashes) to the
+    platform, and every business_profile field is optional in Stripe
+    onboarding -- so all fields here are best-effort."""
+
+    business_name: Optional[str] = None
+    url: Optional[str] = None
+    support_email: Optional[str] = None
+    support_phone: Optional[str] = None
+    address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
+    address_city: Optional[str] = None
+    address_state: Optional[str] = None
+    address_postal_code: Optional[str] = None
+    address_country: Optional[str] = None
+    email: Optional[str] = None
+    country: Optional[str] = None
+    default_currency: Optional[str] = None
+
+
 class ConnectStatusResponse(BaseModel):
     stripe_account_id: Optional[str] = None
     charges_enabled: bool = False
@@ -47,6 +69,7 @@ class ConnectStatusResponse(BaseModel):
     # the UI say "action needed: upload ID" instead of a vague "reviewing".
     disabled_reason: Optional[str] = None
     requirements_due: list[str] = []
+    profile: Optional[ConnectProfile] = None
 
 
 def _tenant_account_id(db: Session, tenant_id: int) -> Optional[str]:
@@ -115,6 +138,8 @@ async def connect_status(tenant_id: int, db: Session = Depends(get_db)):
         return ConnectStatusResponse(stripe_account_id=account_id)
     account = stripe.Account.retrieve(account_id)
     requirements = account.get("requirements") or {}
+    business_profile = account.get("business_profile") or {}
+    support_address = business_profile.get("support_address") or {}
     return ConnectStatusResponse(
         stripe_account_id=account_id,
         charges_enabled=bool(account.get("charges_enabled")),
@@ -125,5 +150,20 @@ async def connect_status(tenant_id: int, db: Session = Depends(get_db)):
                 (requirements.get("past_due") or [])
                 + (requirements.get("currently_due") or [])
             )
+        ),
+        profile=ConnectProfile(
+            business_name=business_profile.get("name"),
+            url=business_profile.get("url"),
+            support_email=business_profile.get("support_email"),
+            support_phone=business_profile.get("support_phone"),
+            address_line1=support_address.get("line1"),
+            address_line2=support_address.get("line2"),
+            address_city=support_address.get("city"),
+            address_state=support_address.get("state"),
+            address_postal_code=support_address.get("postal_code"),
+            address_country=support_address.get("country"),
+            email=account.get("email"),
+            country=account.get("country"),
+            default_currency=account.get("default_currency"),
         ),
     )
