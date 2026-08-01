@@ -5,6 +5,7 @@ import { Skeleton } from 'antd';
 import moment from 'moment';
 
 import axios from '../util/Api.js';
+import Logo from '../components/Logo.js';
 
 const Receipt = () => {
   const [receiptData, setReceiptData] = React.useState(null);
@@ -75,8 +76,8 @@ const Receipt = () => {
     <div className="receipt-main-container">
       <div className="receipt-inner-container">
         <div className="receipt-header-row">
-          <div>AMPAY</div>
-          <div className="receipt-header-row-subtitle">SCAN - PAY - CHARGE</div>
+          <Logo size={24} />
+          <div className="receipt-header-row-subtitle">Scan · Pay · Charge</div>
         </div>
         <div className="receipt-content-container">
           <Skeleton active loading={false /* !sessionData*/}>

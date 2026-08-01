@@ -299,7 +299,7 @@ export default function Charging() {
                 style={{
                   width: '100%',
                   '--track-width': '35px',
-                  '--fill-color': '#31bd83',
+                  '--fill-color': '#2d6a4f',
                 }}
               />
               <span style={{ fontSize: '16px' }}>

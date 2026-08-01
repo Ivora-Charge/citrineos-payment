@@ -1,18 +1,19 @@
 import * as React from 'react';
-import IvoraIcon from '../assets/images/ivora-icon.png';
+import IvoraMark from '../assets/images/ivora-mark.png';
 
 /**
- * Ivora Charge lockup: elephant icon mark (light/ivory variant) + wordmark.
- * `size` controls the icon badge in px. Set `wordmark={false}` for icon-only.
+ * Ivora Charge lockup: the elephant mark from ivoracharge.com plus the
+ * serif wordmark, matching the website's nav-brand. `size` controls the
+ * mark height in px. Set `wordmark={false}` for mark-only.
  */
-export default function Logo({ size = 36, wordmark = true }) {
+export default function Logo({ size = 28, wordmark = true }) {
   return (
     <div className="ivora-logo">
       <img
         className="ivora-logo__badge"
-        src={IvoraIcon}
+        src={IvoraMark}
         alt="Ivora Charge"
-        style={{ width: size, height: size }}
+        style={{ height: size }}
       />
       {wordmark && (
         <div className="ivora-logo__wm">

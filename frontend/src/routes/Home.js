@@ -94,7 +94,7 @@ export default function Home() {
           </Button>
         </Form>
 
-        <div className="pay-options on-dark" style={{ marginBottom: 0 }}>
+        <div className="pay-options" style={{ marginBottom: 0 }}>
           <PaymentOptions />
         </div>
       </div>
