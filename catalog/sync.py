@@ -78,6 +78,7 @@ def upsert_payment_catalog(
     power_type: str = DEFAULT_POWER_TYPE,
     max_voltage: int = DEFAULT_MAX_VOLTAGE,
     max_amperage: int = DEFAULT_MAX_AMPERAGE,
+    plug_and_charge: "bool | None" = None,
 ) -> dict:
     """Upsert the full operator -> location -> tariff -> evse -> connector chain.
 
@@ -172,17 +173,24 @@ def upsert_payment_catalog(
             setattr(tariff, k, v)
         tariff_created = False
 
+    # plug_and_charge is tri-state on purpose: None (field absent from the
+    # payload) leaves the stored flag alone, so callers without the toggle
+    # (UI without the field yet, partial seeds) can't silently reset an
+    # operator's opt-in. Only an explicit true/false writes it.
+    evse_defaults = {
+        "ocpp_evse_id": ocpp_evse_id,
+        "status": "Available",
+        "station_id": station_id,
+        "tenant_id": tenant_id,
+        "location_id": location.id,
+    }
+    if plug_and_charge is not None:
+        evse_defaults["plug_and_charge"] = plug_and_charge
     evse, evse_created = get_or_create(
         db,
         Evse,
         evse_id=evse_id,
-        defaults={
-            "ocpp_evse_id": ocpp_evse_id,
-            "status": "Available",
-            "station_id": station_id,
-            "tenant_id": tenant_id,
-            "location_id": location.id,
-        },
+        defaults=evse_defaults,
     )
     ensure_phone_code(db, evse)
 

@@ -34,6 +34,7 @@ from integrations.charger_display import (
     get_display_adapter,
 )
 from schemas.status_notification import StatusNotificationRequest
+from utils import live
 from utils.utils import stripe_account_kwargs
 from schemas.transaction_event import (
     IdTokenType,
@@ -69,6 +70,9 @@ class CitrineOSevent(BaseModel):
 class CitrineOSeventHeaders(BaseModel):
     # citrineos-core main renamed the event header stationId → ocppConnectionName
     stationId: str = Field(alias="ocppConnectionName")
+    # Station's tenant (stringified by the core's AMQP sender); "1" for
+    # events published before the header existed.
+    tenantId: str = "1"
     model_config = ConfigDict(populate_by_name=True)
 
 
@@ -82,6 +86,7 @@ class CitrineOSIntegration(OcppIntegration):
         idTokenType: str,
         additionalInfo: List[Tuple[str, str]],
         app: FastAPI = None,
+        tenant_id: "str | int" = 1,
     ):
         idToken = {
             "idToken": idToken,
@@ -107,13 +112,14 @@ class CitrineOSIntegration(OcppIntegration):
                     'INSERT INTO "Authorizations" '
                     '("idToken", "idTokenType", "status", "tenantId", '
                     '"additionalInfo", "createdAt", "updatedAt") '
-                    "VALUES (:id_token, :id_token_type, 'Accepted', 1, "
+                    "VALUES (:id_token, :id_token_type, 'Accepted', :tenant_id, "
                     "CAST(:additional_info AS jsonb), now(), now()) "
                     'ON CONFLICT ("tenantId", "idToken", "idTokenType") DO NOTHING'
                 ),
                 {
                     "id_token": idToken["idToken"],
                     "id_token_type": idToken["type"],
+                    "tenant_id": int(tenant_id),
                     "additional_info": json.dumps(idToken["additionalInfo"]),
                 },
             )
@@ -673,7 +679,9 @@ class CitrineOSIntegration(OcppIntegration):
                 id_tag,
             )
             return
-        transaction_id = await self._ocpp16_active_transaction_id(station_id)
+        transaction_id = await self._ocpp16_active_transaction_id(
+            station_id, tenant_id=int(citrine_os_event_headers.tenantId)
+        )
         if transaction_id is None and remote_start_id is None:
             # No idTag AND no active transaction row: the CSMS rejected the
             # session (1.6 validates strictly), nothing to guard or bill.
@@ -894,7 +902,16 @@ class CitrineOSIntegration(OcppIntegration):
         # not fire at all; if a mis-provisioned charger starts an unauthorized
         # session anyway, stop it right away. The driver pays via the standing
         # QR, and the paid RequestStartTransaction starts the real session.
-        if Config.SCAN_AND_CHARGE_REQUIRE_PREPAYMENT:
+        # Per-EVSE override: with plug_and_charge enabled the operator wants
+        # exactly these sessions -- charging starts on plug-in and the driver
+        # pays via the transaction QR below while it runs.
+        if evse.plug_and_charge:
+            info(
+                f" [CitrineOS] Unauthorized session {transactionId} on "
+                f"{stationId}: plug-and-charge enabled for {evse.evse_id} "
+                "-- letting it run."
+            )
+        elif Config.SCAN_AND_CHARGE_REQUIRE_PREPAYMENT:
             warning(
                 f" [CitrineOS] Unauthorized session {transactionId} on "
                 f"{stationId}: prepayment required -- stopping it. Check the "
@@ -1098,6 +1115,7 @@ class CitrineOSIntegration(OcppIntegration):
         db.add(db_checkout)
         db.commit()
         db.refresh(db_checkout)
+        live.notify(db_checkout.id)
 
         # The paid session is running: take the standing "scan to pay" QR down
         # so nobody scans/pays for a connector that is already charging. It is
@@ -1191,6 +1209,7 @@ class CitrineOSIntegration(OcppIntegration):
         db.add(db_checkout)
         db.commit()
         db.refresh(db_checkout)
+        live.notify(db_checkout.id)
         return
 
     async def process_transaction_ended(
@@ -1222,6 +1241,7 @@ class CitrineOSIntegration(OcppIntegration):
         db.add(db_checkout)
         db.commit()
         db.refresh(db_checkout)
+        live.notify(db_checkout.id)
 
         await self.capture_payment_transaction(app=None, checkout_id=db_checkout.id)
 
@@ -1459,6 +1479,11 @@ class CitrineOSIntegration(OcppIntegration):
                 # push_standing_qr just refreshed display_adapter_type, so
                 # the vendor gate inside is current.
                 await rcd_vendor.push_rates(self, db, db_evse)
+                # Keep the FFFFFFFF plug-and-charge whitelist in step with
+                # the per-EVSE opt-in (same freshness argument as above).
+                await rcd_vendor.sync_plug_and_charge_authorization(
+                    self, db, db_evse
+                )
             except Exception as e:
                 exception(
                     " [CitrineOS] Boot-time standing-QR push failed: %r",
@@ -1494,6 +1519,26 @@ class CitrineOSIntegration(OcppIntegration):
         db.add(db_evse)
         db.commit()
         db.refresh(db_evse)
+
+        # Wake any event stream watching an open checkout on this EVSE: the
+        # pre-start page flips "plug in" -> "Preparing" off this status.
+        # Notifying an id nobody watches is a no-op, so no need to be precise.
+        try:
+            open_checkout_ids = (
+                db.query(CheckoutModel.id)
+                .join(
+                    ConnectorModel,
+                    CheckoutModel.connector_id == ConnectorModel.id,
+                )
+                .filter(ConnectorModel.evse_id == db_evse.id)
+                .filter(CheckoutModel.transaction_end_time.is_(None))
+                .filter(CheckoutModel.captured_at.is_(None))
+                .all()
+            )
+            for (checkout_id,) in open_checkout_ids:
+                live.notify(checkout_id)
+        except Exception as e:
+            debug(" [CitrineOS] live notify on status failed: %r", e.__str__())
 
         # Standing "scan to pay" QR: with prepayment enforced the driver plugs
         # in FIRST and then pays, so the QR must stay up while the connector is

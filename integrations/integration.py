@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from config import Config
 from db.init_db import get_db, Checkout, Connector, Evse, Location, Operator
+from utils.receipt_email import send_receipt_email
 from utils.utils import generate_pricing, stripe_account_kwargs
 
 # Stripe rejects charges below the per-currency minimum (~$0.50 for USD); skip
@@ -69,10 +70,10 @@ class OcppIntegration:
         pricing = generate_pricing(checkout_id=checkout_id)
 
         # You can never capture more than was authorized (the manual-capture hold
-        # placed at checkout). If the session's gross cost exceeds the
-        # authorization, capture the full hold instead of letting Stripe reject
-        # the capture for exceeding the authorized amount.
-        amount_to_capture = pricing.total_costs_gross
+        # placed at checkout). If the session's total (gross + payment fee)
+        # exceeds the authorization, capture the full hold instead of letting
+        # Stripe reject the capture for exceeding the authorized amount.
+        amount_to_capture = pricing.total_due
         overage_subunits = 0
         if (
             db_checkout.authorization_amount is not None
@@ -156,6 +157,9 @@ class OcppIntegration:
             self._charge_overage(
                 db, db_checkout, db_operator, suc_intent, pricing, overage_subunits
             )
+        # After the overage attempt, so "amount charged to card" on the
+        # receipt reflects what was actually collected.
+        send_receipt_email(db, db_checkout, pricing)
         return
 
     def _charge_overage(
@@ -236,6 +240,7 @@ class OcppIntegration:
         idTokenType: str,
         additionalInfo: List[Tuple[str, str]],
         app: FastAPI = None,
+        tenant_id: "str | int" = 1,
     ):
         pass
 

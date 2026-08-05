@@ -36,8 +36,10 @@ from datetime import datetime, timezone
 from logging import debug, info, warning
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import text as sql_text
+
 from config import Config
-from db.init_db import get_db
+from db.init_db import get_db, Evse as EvseModel
 from schemas.transaction_event import (
     MeasurandEnumType,
     MeterValueType,
@@ -130,7 +132,9 @@ def build_default_price_value(tariff) -> str:
     if flat_fee:
         parts.append(f"{flat_fee:.2f} {currency} session fee")
     if payment_fee:
-        parts.append(f"+{payment_fee:.2f} {currency} transaction fee")
+        # payment_fee is a PERCENTAGE of the session total (see
+        # TransactionSummary.payment_costs_gross), not an absolute amount.
+        parts.append(f"+{payment_fee:g}% transaction fee")
     price_text = _wrap_price_text(parts) or f"0.00 {currency}/kWh"
 
     return json.dumps(
@@ -269,6 +273,90 @@ async def push_zone_offset(ocpp, db, evse) -> None:
         warning(
             " [rcd] zone offset push failed for %s: %r",
             evse.station_id,
+            e.__str__(),
+        )
+
+
+# Renova plug-and-charge: the firmware autostarts a plug-in session with this
+# fixed idTag. Unknown to the CSMS it answers StartTransaction with Invalid
+# and the charger stops the session (reason=DeAuthorized), so the tag must be
+# whitelisted in the station tenant's Authorizations while the opt-in is on.
+PLUG_AND_CHARGE_ID_TAG = "FFFFFFFF"
+PLUG_AND_CHARGE_ID_TAG_TYPE = "ISO14443"
+
+
+async def sync_plug_and_charge_authorization(ocpp, db, evse) -> None:
+    """Keep the tenant's FFFFFFFF whitelist row in step with the per-EVSE
+    plug_and_charge opt-in (rides the same boot / catalog-sync hooks as the
+    rate push):
+
+    - any EVSE in the tenant opted in -> upsert an Accepted row with
+      concurrentTransaction=true (every Renova gun sends the SAME tag, so the
+      second simultaneous session must not be refused as ConcurrentTx);
+    - none opted in -> delete the row, so disabling actually re-blocks.
+
+    Tenant-level on purpose: 1.6 authorization has no clean per-connector
+    scoping, and the tag is meaningless outside Renova chargers. Best-effort,
+    like every vendor hook."""
+    try:
+        if not is_rcd_evse(evse):
+            return
+        any_enabled = (
+            db.query(EvseModel)
+            .filter(EvseModel.tenant_id == evse.tenant_id)
+            .filter(EvseModel.plug_and_charge.is_(True))
+            .count()
+            > 0
+        )
+        if any_enabled:
+            db.execute(
+                sql_text(
+                    'INSERT INTO "Authorizations" '
+                    '("idToken", "idTokenType", "status", "concurrentTransaction", '
+                    '"tenantId", "createdAt", "updatedAt") '
+                    "VALUES (:id_token, :id_token_type, 'Accepted', true, "
+                    ":tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    'ON CONFLICT ("tenantId", "idToken", "idTokenType") DO UPDATE '
+                    "SET \"status\" = 'Accepted', \"concurrentTransaction\" = true, "
+                    '"updatedAt" = CURRENT_TIMESTAMP'
+                ),
+                {
+                    "id_token": PLUG_AND_CHARGE_ID_TAG,
+                    "id_token_type": PLUG_AND_CHARGE_ID_TAG_TYPE,
+                    "tenant_id": int(evse.tenant_id),
+                },
+            )
+            db.commit()
+            info(
+                " [rcd] plug-and-charge tag %s whitelisted for tenant %s",
+                PLUG_AND_CHARGE_ID_TAG,
+                evse.tenant_id,
+            )
+        else:
+            deleted = db.execute(
+                sql_text(
+                    'DELETE FROM "Authorizations" '
+                    'WHERE "tenantId" = :tenant_id AND "idToken" = :id_token '
+                    'AND "idTokenType" = :id_token_type'
+                ),
+                {
+                    "id_token": PLUG_AND_CHARGE_ID_TAG,
+                    "id_token_type": PLUG_AND_CHARGE_ID_TAG_TYPE,
+                    "tenant_id": int(evse.tenant_id),
+                },
+            ).rowcount
+            db.commit()
+            if deleted:
+                info(
+                    " [rcd] plug-and-charge tag %s revoked for tenant %s "
+                    "(no opted-in EVSE left)",
+                    PLUG_AND_CHARGE_ID_TAG,
+                    evse.tenant_id,
+                )
+    except Exception as e:
+        warning(
+            " [rcd] plug-and-charge authorization sync failed for %s: %r",
+            evse.evse_id,
             e.__str__(),
         )
 

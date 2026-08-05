@@ -11,6 +11,7 @@ from db.init_db import Connector, Evse, Transaction, get_db, Checkout as Checkou
 from integrations.charger_display import get_display_adapter
 from integrations.integration import OcppIntegration
 from schemas.checkouts import RequestStartStopStatusEnumType
+from utils import live
 
 router = APIRouter()
 
@@ -107,6 +108,11 @@ async def stripe_webhook(
                 status_code=404, detail="No checkout found for payment intent"
             )
         db_checkout.authorization_amount = checkout_session.get("amount_total")
+        # Stripe Checkout always collects the payer's email; keep it so
+        # settlement can send the itemized receipt. (Persisted by the
+        # handlers' commit below.)
+        customer_details = checkout_session.get("customer_details") or {}
+        db_checkout.customer_email = customer_details.get("email")
 
         if paymentIntentId and checkoutId and not transactionId:
             await handle_web_portal(db, ocpp_integration, db_checkout, paymentIntentId)
@@ -135,24 +141,6 @@ async def handle_web_portal(
     db.add(db_checkout)
     db.commit()
 
-    # TODO: Remove this part when CitrineOS is correctly saving the idToken from RemoteStartRequests.
-    authorization = await ocpp_integration.create_authorization(
-        f"{Config.OCPP_REMOTESTART_IDTAG_PREFIX}{db_checkout.id}",
-        "Central",
-        [
-            (paymentIntentId, "PaymentIntentId"),
-        ],
-    )
-    if authorization is None:
-        debug(" [Stripe] Unable to create authorization for transaction")
-        cancel_payment_intent(paymentIntentId)
-        raise HTTPException(
-            status_code=404, detail="Unable to create authorization for transaction"
-        )
-
-    idToken = authorization["idToken"]
-    request_body = {"remoteStartId": db_checkout.id, "idToken": idToken}
-
     db_connector = (
         db.query(Connector).filter(Connector.id == db_checkout.connector_id).first()
     )
@@ -170,7 +158,32 @@ async def handle_web_portal(
         )
         return RequestStartStopStatusEnumType.REJECTED
 
-    request_body["evseId"] = db_evse.ocpp_evse_id
+    # TODO: Remove this part when CitrineOS is correctly saving the idToken from RemoteStartRequests.
+    # The row must land in the STATION's tenant: CitrineOS validates the 1.6
+    # StartTransaction idTag against that tenant's Authorizations, and a
+    # mismatch answers idTagInfo=Invalid -- the charger then stops with
+    # reason=DeAuthorized right after accepting the remote start.
+    authorization = await ocpp_integration.create_authorization(
+        f"{Config.OCPP_REMOTESTART_IDTAG_PREFIX}{db_checkout.id}",
+        "Central",
+        [
+            (paymentIntentId, "PaymentIntentId"),
+        ],
+        tenant_id=db_evse.tenant_id,
+    )
+    if authorization is None:
+        debug(" [Stripe] Unable to create authorization for transaction")
+        cancel_payment_intent(paymentIntentId)
+        raise HTTPException(
+            status_code=404, detail="Unable to create authorization for transaction"
+        )
+
+    idToken = authorization["idToken"]
+    request_body = {
+        "remoteStartId": db_checkout.id,
+        "idToken": idToken,
+        "evseId": db_evse.ocpp_evse_id,
+    }
 
     debug(" [Stripe] remote start request: %r", json.dumps(request_body))
 
@@ -191,6 +204,7 @@ async def handle_web_portal(
 
     db.add(db_checkout)
     db.commit()
+    live.notify(db_checkout.id)
     debug(
         " [Stripe] paymentIntentId: %r, checkoutId: %r, requestStartStatus: %r",
         db_checkout.payment_intent_id,
@@ -254,6 +268,7 @@ async def handle_scan_and_charge(
             (transactionId, "TransactionId"),
             (paymentIntentId, "PaymentIntentId"),
         ],
+        tenant_id=db_evse.tenant_id,
     )
     if authorization is None:
         debug(" [Stripe] Unable to create authorization for transaction")
@@ -293,6 +308,7 @@ async def handle_scan_and_charge(
     db_checkout.payment_intent_id = paymentIntentId
     db.add(db_checkout)
     db.commit()
+    live.notify(db_checkout.id)
     if remote_start_stop == RequestStartStopStatusEnumType.REJECTED:
         # Same as the web-portal path: a rejected start means no session, so
         # the driver's hold must be released immediately.

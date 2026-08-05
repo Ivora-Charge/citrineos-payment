@@ -3,18 +3,16 @@
   "global.error.evsenotfound": "EVSE ID konnte nicht gefunden werden.",
   "global.error.evseoccupied": "EVSE ID ist aktuell nicht frei oder offline.",
   "global.error.generic": "Ein unbekannter Fehler ist aufgetreten. Bitte versuches es später erneut.",
-
   "home.headline": "Auf geht's zum Laden.",
   "home.subheading": "Keine App, keine Anmeldung — gib deine Ladepunkt-ID ein oder scanne den Code am Gerät.",
   "home.instructions": "Scanne den QR Code auf der Ladestation mit deiner Smartphone-Kamera oder gib die ID der Ladestation ein.",
   "home.error.evseidmissing": "Bitt gib eine EVSE ID ein.",
-
   "checkout.operator": "Betreiber",
   "checkout.tariffinfo": "Tarif Info",
   "checkout.whatyoupay": "Das zahlst du",
   "checkout.securedbystripe": "Abgesichert durch Stripe",
   "checkout.pricekwh": "kWh",
-  "checkout.pricemin":  "Minute",
+  "checkout.pricemin": "Minute",
   "checkout.pricesession": "Sitzung",
   "checkout.inclvat": "inkl. MwST",
   "checkout.connect.vehicle": "Bitte verbinde dein Fahrzeug und klicke auf den Button, um die Zahlung durchzuführen.",
@@ -24,7 +22,6 @@
   "checkout.button.checkout": "Bezahlen",
   "checkout.button.paynow": "Jetzt bezahlen",
   "checkout.error.tanotaccepted": "Du musst die Nutzungsbedinungen akzeptieren!",
-
   "charging.speed": "Lädt",
   "charging.authorized.waiting": "Zahlung bestätigt — zum Laden einstecken",
   "charging.preparing": "Ladevorgang wird vorbereitet…",
@@ -48,7 +45,6 @@
   "charging.stop.confirm.no": "Weiter laden",
   "charging.stop.requested": "Stopp angefordert — wird abgeschlossen…",
   "charging.stop.failed": "Ladevorgang konnte nicht beendet werden. Bitte erneut versuchen oder an der Ladestation beenden.",
-
   "receipt.sessiondetails": "Session Details",
   "receipt.starttime": "Startzeit",
   "receipt.stoptime": "Stoppzeit",
@@ -69,6 +65,9 @@
   "receipt.enjoyedcharging": "Wir hoffen, dass Ihnen das Ladeerlebnis gefallen hat und freuen uns auf Ihren nächsten Besuch!",
   "receipt.problemsoperator": "Sollten Probleme mit diesem Beleg auftreten, wenden Sie sich bitte an den Betreiber",
   "receipt.footermsg": "Der Ivora Charge Bezahlservice wird bereitgestellt von Ivora Solutions Inc. im Auftrag von",
-
-  "next.subheading": "blalala"
+  "next.subheading": "blalala",
+  "checkout.transactionfee": "Kartentransaktionsgebühr",
+  "charging.transactionfee": "Transaktionsgebühr (enthalten)",
+  "receipt.transactionfee": "Transaktionsgebühr",
+  "receipt.totaldue": "Gesamt inkl. Transaktionsgebühr"
 }

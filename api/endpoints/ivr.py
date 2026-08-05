@@ -144,6 +144,8 @@ def _spoken_pricing(tariff: TariffModel) -> str:
         parts.append(
             f"a session fee of {_spoken_money(tariff.price_session, tariff.currency)}"
         )
+    if tariff.payment_fee:
+        parts.append(f"a {tariff.payment_fee:g} percent transaction fee")
     return ", plus ".join(parts) if parts else "shown on the charger"
 
 

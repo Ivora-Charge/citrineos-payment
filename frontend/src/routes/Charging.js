@@ -28,76 +28,72 @@ export default function Charging() {
   const { evseId, sessionId } = useParams();
 
   const refreshTimer = React.useRef(null);
+  // Live event stream (SSE). While it is connected the server pushes a fresh
+  // checkout snapshot on every charger event, so no poll timers are scheduled.
+  const eventSourceRef = React.useRef(null);
 
-  // Memoize setSessionData to prevent useEffect from being called unnecessarily
+  // Shared mapping from a checkout payload (poll response or SSE frame) to
+  // page state. Scheduling stays with the callers.
+  const handleCheckoutData = React.useCallback((data) => {
+    // Only an explicit rejection is terminal. A blank status means the
+    // payment webhook / RemoteStart hasn't landed yet (it's async and can
+    // arrive a few seconds after Stripe redirects here) — fall through to the
+    // waiting branch and keep watching rather than showing a false rejection.
+    if (data.remote_request_status === 'Rejected') {
+      setState((prevState) => ({ ...prevState, status: 'rejected' }));
+    } else if (data.id && data.transaction_start_time) {
+      setState((prevState) => {
+        const newState = {
+          ...prevState,
+          ...data,
+          status: data.transaction_end_time ? 'closed' : 'charging',
+          timestamp: moment().format('DD-MM-YYYY HH:mm:ss'), // Using now() instead of last_updated from MeterValues
+        };
+        const moment_start = moment.utc(data.transaction_start_time);
+        const moment_end = data.transaction_end_time
+          ? moment.utc(data.transaction_end_time)
+          : moment(moment().utc().toISOString());
+        newState.chargingTime = moment_end.diff(moment_start, 'seconds');
+        return newState;
+      });
+    } else if (data.id && !data.transaction_start_time) {
+      // Paid & authorized, but charging hasn't begun yet — the driver hasn't
+      // plugged in (pay-before-plug) or the charger is still starting up.
+      // Keep waiting; the session begins automatically on plug-in.
+      // The payload carries the live connector state: once the cable is in,
+      // the EVSE reports 'Occupied' (1.6 "Preparing") and the headline
+      // switches from "plug in" to "Preparing to charge".
+      setState((prevState) => ({
+        ...prevState,
+        evseStatus: data.evse_status ?? prevState.evseStatus,
+        status: 'waiting',
+        timestamp: moment().format('DD-MM-YYYY HH:mm:ss'),
+      }));
+    } else {
+      // Do sth when session unknown...
+      // navigate('/');
+    }
+  }, []);
+
+  // Polling fallback (and manual refresh): fetch once; only chain a timer
+  // when no event stream is connected.
   const setSessionData = React.useCallback(() => {
     axios
       .get(`checkouts/${sessionId}`)
       .then(({ data }) => {
-        // Only an explicit rejection is terminal. A blank status means the
-        // payment webhook / RemoteStart hasn't landed yet (it's async and can
-        // arrive a few seconds after Stripe redirects here) — fall through to the
-        // waiting branch and keep polling rather than showing a false rejection.
+        handleCheckoutData(data);
+        if (eventSourceRef.current) {
+          return;
+        } // stream drives updates
         if (data.remote_request_status === 'Rejected') {
-          setState((prevState) => ({ ...prevState, status: 'rejected' }));
-        } else if (data.id && data.transaction_start_time) {
-          const transaction = { ...data };
-          const newState = {
-            ...state,
-            ...transaction,
-            status: 'charging',
-            timestamp: moment().format('DD-MM-YYYY HH:mm:ss'), // Using now() instead of last_updated from MeterValues
-          };
-
-          // Calculate charging time from transaction data
-          if (transaction.transaction_start_time) {
-            if (transaction.transaction_end_time) {
-              newState.status = 'closed';
-              const moment_start = moment.utc(
-                transaction.transaction_start_time,
-              );
-              const moment_end = moment.utc(transaction.transaction_end_time);
-              const diff = moment_end.diff(moment_start, 'seconds');
-              newState.chargingTime = diff;
-            } else {
-              const moment_start = moment.utc(
-                transaction.transaction_start_time,
-              );
-              const moment_now_string = moment().utc().toISOString();
-              const moment_now = moment(moment_now_string);
-              const diff = moment_now.diff(moment_start, 'seconds');
-              newState.chargingTime = diff;
-            }
-          }
-          setState(newState);
-          if (!transaction.transaction_end_time) {
+          return;
+        }
+        if (data.id && data.transaction_start_time) {
+          if (!data.transaction_end_time) {
             refreshTimer.current = setTimeout(setSessionData, 30 * 1000); // 30s repeat timer, but only if we don't have an end_datetime yet
           }
         } else if (data.id && !data.transaction_start_time) {
-          // Paid & authorized, but charging hasn't begun yet — the driver hasn't
-          // plugged in (pay-before-plug) or the charger is still starting up.
-          // Keep waiting; the session begins automatically on plug-in.
-          // Fetch the live connector state alongside: once the cable is in,
-          // the EVSE reports 'Occupied' (1.6 "Preparing") and the headline
-          // switches from "plug in" to "Preparing to charge".
-          axios
-            .get(`evses/${evseId}`)
-            .then(({ data: evseData }) => {
-              setState((prevState) => ({
-                ...prevState,
-                evseStatus: evseData.status,
-              }));
-            })
-            .catch(() => {});
-          setState((prevState) => ({
-            ...prevState,
-            status: 'waiting',
-            timestamp: moment().format('DD-MM-YYYY HH:mm:ss'),
-          }));
           refreshTimer.current = setTimeout(setSessionData, 5000);
-        } else {
-          // Do sth when session unknown...
-          // navigate('/');
         }
       })
       .catch((e) => {
@@ -108,24 +104,63 @@ export default function Charging() {
           statusMessage: e.response?.data?.detail,
         }));
       });
-  }, [sessionId, evseId, state]);
+  }, [sessionId, handleCheckoutData]);
 
   React.useEffect(() => {
-    if (evseId) {
-      setSessionData();
-    } else {
+    if (!evseId) {
       // Navigate to home if no location data is given
       navigate('/');
+      return undefined;
     }
 
-    // Cleanup function to clear the timer on component unmount or re-render
+    let es = null;
+    if (typeof window.EventSource === 'function') {
+      const base = (axios.defaults.baseURL || '').replace(/\/$/, '');
+      es = new EventSource(`${base}/checkouts/${sessionId}/events`);
+      eventSourceRef.current = es;
+      es.onmessage = (event) => {
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        handleCheckoutData(data);
+        if (
+          data.transaction_end_time ||
+          data.remote_request_status === 'Rejected'
+        ) {
+          // Terminal state: the server ends the stream after the final
+          // snapshot; close so EventSource doesn't auto-reconnect forever.
+          es.close();
+        }
+      };
+      es.onerror = () => {
+        // EventSource retries transient drops (phone lock, network blip) by
+        // itself. Only a permanently closed stream (e.g. HTTP error) is
+        // terminal: fall back to the poll loop.
+        if (es.readyState === EventSource.CLOSED && eventSourceRef.current) {
+          eventSourceRef.current = null;
+          setSessionData();
+        }
+      };
+    } else {
+      setSessionData();
+    }
+
+    // Cleanup: clear the timer and stream on unmount or re-render
     return () => {
       clearTimeout(refreshTimer.current);
+      if (es) {
+        es.close();
+      }
+      eventSourceRef.current = null;
     };
-  }, [evseId, navigate, setSessionData]); // Ensure setSessionData is stable by using useCallback
+  }, [evseId, sessionId, navigate, handleCheckoutData, setSessionData]);
 
   const onRefresh = () => {
-    // On manual refresh clear timer and trigger session update which creates new timer
+    // On manual refresh clear any pending timer and fetch immediately (with a
+    // live stream connected this is a one-shot fetch, no new timer).
     clearTimeout(refreshTimer.current);
     setSessionData();
   };
@@ -136,17 +171,22 @@ export default function Charging() {
       confirmText: intl.formatMessage({ id: 'charging.stop.confirm.yes' }),
       cancelText: intl.formatMessage({ id: 'charging.stop.confirm.no' }),
     });
-    if (!confirmed) return;
+    if (!confirmed) {
+      return;
+    }
     setStopping(true);
     try {
       await axios.post(`checkouts/${sessionId}/stop`);
       Toast.show({
         content: intl.formatMessage({ id: 'charging.stop.requested' }),
       });
-      // Poll sooner than the 30s cadence so the page flips to 'closed'
-      // as soon as the charger reports the transaction end.
-      clearTimeout(refreshTimer.current);
-      refreshTimer.current = setTimeout(setSessionData, 5000);
+      // With a live stream the end event is pushed; in polling mode, poll
+      // sooner than the 30s cadence so the page flips to 'closed' as soon
+      // as the charger reports the transaction end.
+      if (!eventSourceRef.current) {
+        clearTimeout(refreshTimer.current);
+        refreshTimer.current = setTimeout(setSessionData, 5000);
+      }
       // `stopping` stays true: the button remains disabled until the status
       // leaves 'charging' and the button unmounts with it.
     } catch (e) {
@@ -258,7 +298,8 @@ export default function Charging() {
 
       {state.status !== 'rejected' ? (
         <>
-          {/* Charging Costs */}
+          {/* Charging Costs: total_due = session costs + tax + transaction
+              fee, the exact amount that will be captured */}
           <div className="width-100 div-with-margin charging-info-block">
             <div>
               {intl.formatMessage({ id: 'charging.costs' })} (
@@ -266,11 +307,31 @@ export default function Charging() {
             </div>
             <div>
               <span>
-                {((state.pricing?.total_costs_gross ?? 0) / 100).toFixed(2)}{' '}
+                {(
+                  (state.pricing?.total_due ??
+                    state.pricing?.total_costs_gross ??
+                    0) / 100
+                ).toFixed(2)}{' '}
               </span>
               <span>{state.pricing?.currency}</span>
             </div>
           </div>
+
+          {/* Transaction fee, already included in the total above */}
+          {state.pricing?.payment_costs_gross > 0 && (
+            <div className="width-100 div-with-margin charging-info-block">
+              <div>
+                {intl.formatMessage({ id: 'charging.transactionfee' })} (
+                {state.pricing?.payment_fee}%)
+              </div>
+              <div>
+                <span>
+                  {((state.pricing?.payment_costs_gross ?? 0) / 100).toFixed(2)}{' '}
+                </span>
+                <span>{state.pricing?.currency}</span>
+              </div>
+            </div>
+          )}
 
           {/* Charging Time */}
           <div className="width-100 div-with-margin charging-info-block">

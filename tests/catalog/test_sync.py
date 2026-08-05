@@ -86,6 +86,29 @@ class UpsertPaymentCatalogTests(unittest.TestCase):
         self.assertEqual(db.query(Tariff).first().price_kwh, 0.45)
         db.close()
 
+    def test_plug_and_charge_defaults_false_and_syncs(self):
+        db = self.Session()
+        upsert_payment_catalog(db, **_payload())
+        db.commit()
+        self.assertFalse(db.query(Evse).first().plug_and_charge)
+
+        # Operator enables it -> re-sync flips the flag in place.
+        upsert_payment_catalog(db, **_payload(plug_and_charge=True))
+        db.commit()
+        self.assertTrue(db.query(Evse).first().plug_and_charge)
+
+        # Tri-state: a later sync WITHOUT the field must leave the opt-in
+        # alone (callers without the toggle can't silently reset it) ...
+        upsert_payment_catalog(db, **_payload())
+        db.commit()
+        self.assertTrue(db.query(Evse).first().plug_and_charge)
+
+        # ... and only an explicit false disables it again.
+        upsert_payment_catalog(db, **_payload(plug_and_charge=False))
+        db.commit()
+        self.assertFalse(db.query(Evse).first().plug_and_charge)
+        db.close()
+
     def test_second_station_gets_its_own_tariff(self):
         db = self.Session()
         upsert_payment_catalog(db, **_payload())

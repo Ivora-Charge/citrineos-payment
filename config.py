@@ -116,6 +116,20 @@ class AppConfig:
     # cadence; 0 disables.
     JANITOR_OFFLINE_HOURS: int = 12
 
+    # Receipt email (utils/receipt_email.py): the itemized receipt sent to the
+    # driver's Stripe Checkout email after settlement. Transport is Resend's
+    # HTTP API when RESEND_API_KEY is set, else SMTP when SMTP_HOST is set;
+    # SMTP_FROM is the sender for both (the domain must be verified in Resend
+    # when using the API). Neither configured => feature off. Mail failures
+    # are logged, never raised -- settlement must not depend on the mailer.
+    RESEND_API_KEY: str = ""
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
+    SMTP_STARTTLS: bool = True
+
     # Offline/Faulted charger alerting (tasks/background.py). Empty URL =>
     # disabled. The payload is Slack-compatible: {"text": "..."}.
     ALERT_WEBHOOK_URL: str = ""

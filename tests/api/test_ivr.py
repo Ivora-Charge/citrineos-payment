@@ -53,8 +53,10 @@ class FakeOcpp:
         self.sent = []
         self.authorizations = []
 
-    async def create_authorization(self, id_token, token_type, additional_info):
-        self.authorizations.append((id_token, token_type, additional_info))
+    async def create_authorization(
+        self, id_token, token_type, additional_info, tenant_id=1
+    ):
+        self.authorizations.append((id_token, token_type, additional_info, tenant_id))
         return {"idToken": {"idToken": id_token, "type": "Central"}}
 
     def send_citrineos_message(self, *, station_id, tenant_id, url_path, json_payload):

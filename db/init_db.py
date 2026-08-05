@@ -77,6 +77,11 @@ class Evse(Base):
     # Network-unique (callers have no tenant context); assigned by
     # catalog/phone_codes.py and printed on the signage.
     phone_code = Column(String(8), unique=True, index=True)
+    # Operator opt-in: let a session that starts WITHOUT authorization (cable
+    # plug-in autostart) keep running instead of being force-stopped by the
+    # SCAN_AND_CHARGE_REQUIRE_PREPAYMENT policy; the driver pays via the
+    # transaction QR while charging.
+    plug_and_charge = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
     connectors = relationship("Connector", back_populates="evse")
 
@@ -161,6 +166,10 @@ class Checkout(Base):
     # Payment channel: 'ivr' for pay-by-phone; NULL for the QR/web flows that
     # predate the column. Lets reporting split revenue by channel.
     source = Column(String(8))
+    # Driver email from Stripe Checkout (customer_details.email), used to send
+    # the itemized receipt after settlement. NULL for channels that never
+    # collect one (IVR).
+    customer_email = Column(String(255))
     qr_code_message_id = Column(
         Integer,
     )
@@ -302,6 +311,12 @@ def init_db() -> None:
         )
         conn.execute(
             text(
+                f'ALTER TABLE "{evses_table}" '
+                "ADD COLUMN IF NOT EXISTS plug_and_charge BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        )
+        conn.execute(
+            text(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS ix_{evses_table}_phone_code "
                 f'ON "{evses_table}" (phone_code)'
             )
@@ -334,6 +349,12 @@ def init_db() -> None:
             text(
                 f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
                 "ADD COLUMN IF NOT EXISTS overage_amount INTEGER"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
+                "ADD COLUMN IF NOT EXISTS customer_email VARCHAR(255)"
             )
         )
         # Money received per OCPP transaction, joined for the operator UI:

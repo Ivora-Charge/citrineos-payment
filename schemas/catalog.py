@@ -58,6 +58,13 @@ class CatalogSyncRequest(BaseModel):
     max_voltage: int = DEFAULT_MAX_VOLTAGE
     max_amperage: int = DEFAULT_MAX_AMPERAGE
 
+    # Plug-and-charge opt-in: sessions that start unauthorized on this EVSE
+    # (cable plug-in autostart) are allowed to run and pay via the transaction
+    # QR, instead of being force-stopped by the prepayment policy.
+    # Tri-state: omitted = leave the stored flag unchanged (so payloads
+    # without the field can't reset an operator's opt-in).
+    plug_and_charge: Optional[bool] = None
+
     @field_validator("power_type", mode="before")
     @classmethod
     def normalize_power_type(cls, v):

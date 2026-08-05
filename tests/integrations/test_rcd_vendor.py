@@ -119,9 +119,11 @@ class RatePayloadTests(RcdVendorTestBase):
             self.assertIn(fragment, flat)
 
     def test_transaction_fee_shown_in_text_but_not_in_charging_price(self):
+        # payment_fee is a percentage of the session total, and must read as
+        # one on the charger screen (matches TransactionSummary's math).
         self.tariff.payment_fee = 0.50
         value = json.loads(rcd_vendor.build_default_price_value(self.tariff))
-        self.assertIn("+0.50 USD transaction fee", value["priceText"])
+        self.assertIn("+0.5% transaction fee", value["priceText"])
         # The fee is checkout-applied; it must not leak into the charger's
         # own offline billing math.
         self.assertNotIn("0.5", json.dumps(value["chargingPrice"]))

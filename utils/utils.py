@@ -58,6 +58,7 @@ def generate_pricing(
         total_costs_gross=transaction_summary.total_costs_gross.get_amount_in_sub_unit(),
         payment_costs_gross=transaction_summary.payment_costs_gross.get_amount_in_sub_unit(),
         payment_costs_net=transaction_summary.payment_costs_net.get_amount_in_sub_unit(),
+        total_due=transaction_summary.total_due.get_amount_in_sub_unit(),
     )
 
 

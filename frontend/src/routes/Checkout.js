@@ -187,7 +187,9 @@ export default function Checkout() {
             {state.status && state.status !== 'UNKNOWN' && (
               <>
                 {' · '}
-                <span className={state.status === 'Available' ? 'avail' : undefined}>
+                <span
+                  className={state.status === 'Available' ? 'avail' : undefined}
+                >
                   {state.status}
                 </span>
               </>
@@ -223,6 +225,12 @@ export default function Checkout() {
                 {cur}
                 {get_price(state.tariff_data?.price_session)} /{' '}
                 {intl.formatMessage({ id: 'checkout.pricesession' })}
+              </div>
+            )}
+            {state.tariff_data?.payment_fee > 0 && (
+              <div className="rate__row">
+                +{state.tariff_data?.payment_fee}%{' '}
+                {intl.formatMessage({ id: 'checkout.transactionfee' })}
               </div>
             )}
           </div>

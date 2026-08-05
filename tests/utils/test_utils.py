@@ -1032,6 +1032,40 @@ class GeneratePricingTests(unittest.TestCase):
             self.assertEqual(pricing.tax_costs, 396)
             self.assertEqual(pricing.total_costs_gross, 5354)
 
+    def test_pricing_total_due_includes_payment_fee(self):
+        # Session-fee-only tariff keeps the numbers exact: net 10.00, tax 1.00,
+        # gross 11.00, 3% fee on net 0.30 -> total due 11.30. total_due is what
+        # the driver sees AND what settlement captures (CTEP: displayed ==
+        # billed).
+        tariff = a_tariff(
+            price_kwh=None,
+            price_minute=None,
+            price_session=10.00,
+            tax_rate=10,
+            payment_fee=3,
+        )
+        checkout = a_checkout(tariff_id=tariff.id, transaction_kwh=None)
+
+        with model_data({Checkout: checkout, Tariff: tariff}):
+            pricing = generate_pricing(checkout.id)
+            self.assertEqual(pricing.total_costs_gross, 1100)
+            self.assertEqual(pricing.payment_costs_gross, 30)
+            self.assertEqual(pricing.total_due, 1130)
+
+    def test_pricing_total_due_equals_gross_when_no_payment_fee(self):
+        tariff = a_tariff(
+            price_kwh=None,
+            price_minute=None,
+            price_session=10.00,
+            tax_rate=10,
+            payment_fee=0,
+        )
+        checkout = a_checkout(tariff_id=tariff.id, transaction_kwh=None)
+
+        with model_data({Checkout: checkout, Tariff: tariff}):
+            pricing = generate_pricing(checkout.id)
+            self.assertEqual(pricing.total_due, pricing.total_costs_gross)
+
     def test_payment_costs_tax_rate_is_zero(self):
         tariff = a_tariff()
         checkout = a_checkout(tariff_id=tariff.id)

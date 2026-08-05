@@ -109,3 +109,11 @@ class TransactionSummary:
     @property
     def payment_costs_net(self) -> Money:
         return self.total_costs_net * self.payment_fee / HUNDRED
+
+    @property
+    def total_due(self) -> Money:
+        """What the driver actually pays: gross session costs plus the
+        payment (card processing) fee. This is the figure that must match
+        across the charging page, the receipt, and the Stripe capture --
+        CTEP requires displayed price == billed price."""
+        return self.total_costs_gross + self.payment_costs_gross

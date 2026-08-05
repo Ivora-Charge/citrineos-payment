@@ -74,6 +74,7 @@ async def sync_catalog(
             power_type=payload.power_type.value,
             max_voltage=payload.max_voltage,
             max_amperage=payload.max_amperage,
+            plug_and_charge=payload.plug_and_charge,
         )
 
         info(f" [catalog] SYNC SUCCESS for evse_id={payload.evse_id}")
@@ -97,6 +98,11 @@ async def sync_catalog(
             # Tariff edits arrive as catalog syncs; keep RCD chargers' local
             # pricing (screen + offline billing) in step with the new rates.
             await rcd_vendor.push_rates(ocpp_integration, db, evse)
+            # And the FFFFFFFF plug-and-charge whitelist in step with the
+            # (possibly just-changed) plug_and_charge opt-in.
+            await rcd_vendor.sync_plug_and_charge_authorization(
+                ocpp_integration, db, evse
+            )
     except Exception as exc:  # noqa: BLE001 - QR display must not fail the sync
         error(f" [catalog] QR push after sync failed for {payload.evse_id}: {exc}")
 

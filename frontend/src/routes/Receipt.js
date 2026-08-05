@@ -236,6 +236,35 @@ const Receipt = () => {
                       )?.toFixed(2)}
                     </td>
                   </tr>
+                  {receiptData?.session?.final_pricing?.payment_costs_gross >
+                    0 && (
+                    <>
+                      <tr>
+                        <td colSpan="3">
+                          {intl.formatMessage({ id: 'receipt.transactionfee' })}{' '}
+                          ({receiptData?.session?.final_pricing?.payment_fee}%)
+                        </td>
+                        <td>
+                          {(
+                            receiptData?.session?.final_pricing
+                              ?.payment_costs_gross / 100
+                          ).toFixed(2)}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td colSpan="3">
+                          {intl.formatMessage({ id: 'receipt.totaldue' })}
+                        </td>
+                        <td>
+                          {(
+                            (receiptData?.session?.final_pricing?.total_due ??
+                              receiptData?.session?.final_pricing
+                                ?.total_costs_gross) / 100
+                          ).toFixed(2)}
+                        </td>
+                      </tr>
+                    </>
+                  )}
                   {receiptData?.session?.final_pricing?.from_auth && (
                     <>
                       <tr>

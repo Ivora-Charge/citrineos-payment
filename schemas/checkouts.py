@@ -41,6 +41,8 @@ class Pricing(BaseModel):
     total_costs_gross: int = 0
     payment_costs_gross: int = 0
     payment_costs_net: int = 0
+    # total_costs_gross + payment_costs_gross: the amount the driver pays.
+    total_due: int = 0
 
 
 class Checkout(CheckoutBase):
@@ -57,3 +59,6 @@ class Checkout(CheckoutBase):
     power_active_import: float | None
     transaction_soc: float | None
     pricing: Pricing | None
+    # Live connector state of the checkout's EVSE ('Available' / 'Occupied' /
+    # ...), so the pre-start page can say "Preparing" without a second request.
+    evse_status: str | None = None

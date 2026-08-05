@@ -1,9 +1,13 @@
+import asyncio
+
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from db.init_db import (
     get_db,
+    SessionLocal,
     Connector as ConnectorModel,
     Evse as EvseModel,
     Tariff as TariffModel,
@@ -12,9 +16,17 @@ from db.init_db import (
 )
 
 from schemas.checkouts import Checkout, CheckoutCreate, CheckoutCreateResponse
+from utils import live
 from utils.utils import generate_pricing, stripe_account_kwargs
 
 router = APIRouter()
+
+# SSE refresh cadence between charger events: keeps the charging clock and
+# time-based costs ticking smoothly on the page (charger data itself only
+# changes per MeterValue), and keeps intermediaries (nginx's default 60s
+# proxy_read_timeout) from cutting an idle stream. Each tick is one snapshot
+# (a short DB session + pricing calc) per connected client.
+EVENTS_SNAPSHOT_SECONDS = 2
 
 
 @router.post("/", response_model=CheckoutCreateResponse)
@@ -81,17 +93,87 @@ def create_checkout(request_body: CheckoutCreate, db: Session = Depends(get_db))
     )
 
 
+def _checkout_snapshot(checkout_id: int) -> "Checkout | None":
+    """The full checkout payload (pricing + live EVSE status) from a fresh,
+    short-lived session. Used by the GET and by every SSE frame -- an event
+    stream must never hold a pooled connection open for its lifetime."""
+    db = SessionLocal()
+    try:
+        db_checkout = (
+            db.query(CheckoutModel).filter(CheckoutModel.id == checkout_id).first()
+        )
+        if db_checkout is None:
+            return None
+        db_connector = (
+            db.query(ConnectorModel)
+            .filter(ConnectorModel.id == db_checkout.connector_id)
+            .first()
+        )
+        db_evse = (
+            db.query(EvseModel).filter(EvseModel.id == db_connector.evse_id).first()
+            if db_connector
+            else None
+        )
+        return Checkout(
+            **{
+                **db_checkout.__dict__,
+                "pricing": generate_pricing(db_checkout.id),
+                "evse_status": db_evse.status if db_evse is not None else None,
+            }
+        )
+    finally:
+        db.close()
+
+
 @router.get("/{id}", response_model=Checkout)
-def get_checkout(id: int, db: Session = Depends(get_db)):
-    db_checkout = db.query(CheckoutModel).filter(CheckoutModel.id == id).first()
-    if db_checkout is None:
+def get_checkout(id: int):
+    output_checkout = _checkout_snapshot(id)
+    if output_checkout is None:
         raise HTTPException(status_code=404, detail="charging.error.sessionnotfound")
 
-    output_checkout = Checkout(
-        **{**db_checkout.__dict__, "pricing": generate_pricing(db_checkout.id)}
-    )
-
     return output_checkout
+
+
+@router.get("/{id}/events")
+async def checkout_events(id: int):
+    """Server-sent events stream of checkout snapshots for the charging page.
+
+    Sends a snapshot immediately, then on every checkout change (meter values,
+    session start/end, webhook status) via utils.live, plus a periodic refresh
+    every EVENTS_SNAPSHOT_SECONDS. The stream ends once the transaction has an
+    end time -- the client shows the final state and stops reconnecting."""
+    if _checkout_snapshot(id) is None:
+        raise HTTPException(status_code=404, detail="charging.error.sessionnotfound")
+
+    async def stream():
+        queue = live.subscribe(id)
+        try:
+            while True:
+                snapshot = _checkout_snapshot(id)
+                if snapshot is None:
+                    break  # checkout vanished mid-stream; nothing left to say
+                yield f"data: {snapshot.model_dump_json()}\n\n"
+                if snapshot.transaction_end_time is not None:
+                    break
+                try:
+                    await asyncio.wait_for(
+                        queue.get(), timeout=EVENTS_SNAPSHOT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    pass  # heartbeat: fall through to a fresh snapshot
+        finally:
+            live.unsubscribe(id, queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # Tell nginx not to buffer this response -- avoids needing a
+            # proxy_buffering directive in the (sudo-gated) site config.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/{id}/stop")
