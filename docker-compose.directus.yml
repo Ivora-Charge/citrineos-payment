@@ -1,5 +1,5 @@
 # Directus instance for citrineos-payment QR-code / Scan-and-Charge hosting.
-# Sqlite-backed, listening on localhost:8055 to match CITRINEOS_DIRECTUS_URL in .env.
+# Sqlite-backed, bound to 127.0.0.1:8055 (host nginx proxies pqr-test) to match CITRINEOS_DIRECTUS_URL in .env.
 #   Start:  sg docker -c "docker compose -f docker-compose.directus.yml up -d"
 #   Logs:   sg docker -c "docker compose -f docker-compose.directus.yml logs -f directus"
 version: "3.8"
@@ -8,16 +8,16 @@ services:
     image: directus/directus:11
     container_name: directus
     ports:
-      - "8055:8055"
+      - "127.0.0.1:8055:8055"
     volumes:
       - directus-database:/directus/database
       - directus-uploads:/directus/uploads
       - directus-extensions:/directus/extensions
     environment:
-      KEY: "citrineos-payment-directus-key"
-      SECRET: "citrineos-payment-directus-secret"
+      KEY: "${DIRECTUS_KEY:?set in .env}"
+      SECRET: "${DIRECTUS_SECRET:?set in .env}"
       ADMIN_EMAIL: "admin@citrineos.com"
-      ADMIN_PASSWORD: "CitrineOS!"
+      ADMIN_PASSWORD: "${DIRECTUS_ADMIN_PASSWORD:?set in .env}"
       DB_CLIENT: "sqlite3"
       DB_FILENAME: "/directus/database/data.db"
       WEBSOCKETS_ENABLED: "true"
