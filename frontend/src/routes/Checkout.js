@@ -166,11 +166,15 @@ export default function Checkout() {
             {state.operator || 'This charging point'}
           </h1>
 
-          {state.address && (
+          {(state.name || state.address) && (
             <div className="charger-place">
               <i className="ri-map-pin-line" />
               <span>
-                {state.address}, {state.postalCode} {state.city}
+                {state.name ? `${state.name} — ` : ''}
+                {state.address}
+                {state.postal_code || state.city
+                  ? `, ${[state.postal_code, state.city].filter(Boolean).join(' ')}`
+                  : ''}
                 {state.state ? `, ${state.state}` : ''}
               </span>
             </div>
@@ -178,11 +182,14 @@ export default function Checkout() {
 
           <div className="charger-ref">
             {evseId} · max{' '}
-            {getConnectorPowerKw(
-              state.max_voltage,
-              state.max_amperage,
-              state.power_type,
-            )}{' '}
+            {state.max_power_watts
+              ? Math.round((state.max_power_watts / 1000 + Number.EPSILON) * 100) /
+                100
+              : getConnectorPowerKw(
+                  state.max_voltage,
+                  state.max_amperage,
+                  state.power_type,
+                )}{' '}
             kW
             {state.status && state.status !== 'UNKNOWN' && (
               <>
@@ -213,10 +220,10 @@ export default function Checkout() {
                 </span>
               </div>
             )}
-            {state.tariff_data?.price_min > 0 && (
+            {state.tariff_data?.price_minute > 0 && (
               <div className="rate__row">
                 {cur}
-                {get_price(state.tariff_data?.price_min)} /{' '}
+                {get_price(state.tariff_data?.price_minute)} /{' '}
                 {intl.formatMessage({ id: 'checkout.pricemin' })}
               </div>
             )}

@@ -78,6 +78,8 @@ def upsert_payment_catalog(
     power_type: str = DEFAULT_POWER_TYPE,
     max_voltage: int = DEFAULT_MAX_VOLTAGE,
     max_amperage: int = DEFAULT_MAX_AMPERAGE,
+    max_power_watts: Optional[int] = None,
+    location_name: Optional[str] = None,
     plug_and_charge: "bool | None" = None,
 ) -> dict:
     """Upsert the full operator -> location -> tariff -> evse -> connector chain.
@@ -113,6 +115,18 @@ def upsert_payment_catalog(
             # lookup above proved no other row holds it.
             operator.stripe_account_id = stripe_account_id
             db.add(operator)
+    elif operator.name != operator_name:
+        # The tenant renamed their business: follow it so the checkout page
+        # shows the current legal name. Guarded because name is UNIQUE and
+        # several dev tenants may share the 'platform' account.
+        name_taken = (
+            db.query(Operator)
+            .filter(Operator.name == operator_name, Operator.id != operator.id)
+            .first()
+        )
+        if name_taken is None:
+            operator.name = operator_name
+            db.add(operator)
 
     location, location_created = get_or_create(
         db,
@@ -120,6 +134,7 @@ def upsert_payment_catalog(
         location_id=location_id,
         defaults={
             "operator_id": operator.id,
+            "name": location_name,
             "address": address,
             "postal_code": postal_code,
             "city": city,
@@ -194,17 +209,22 @@ def upsert_payment_catalog(
     )
     ensure_phone_code(db, evse)
 
+    # max_power_watts is tri-state like plug_and_charge: None (absent from the
+    # payload) leaves a previously-synced rating alone rather than clearing it.
+    connector_defaults = {
+        "power_type": power_type,
+        "max_voltage": max_voltage,
+        "max_amperage": max_amperage,
+        "evse_id": evse.id,
+        "tariff_id": tariff.id,
+    }
+    if max_power_watts is not None:
+        connector_defaults["max_power_watts"] = max_power_watts
     connector, connector_created = get_or_create(
         db,
         Connector,
         connector_id=connector_id,
-        defaults={
-            "power_type": power_type,
-            "max_voltage": max_voltage,
-            "max_amperage": max_amperage,
-            "evse_id": evse.id,
-            "tariff_id": tariff.id,
-        },
+        defaults=connector_defaults,
     )
 
     return {

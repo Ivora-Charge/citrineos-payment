@@ -16,6 +16,7 @@ class Connector(BaseModel):
     power_type: ConnectorPowerType
     max_voltage: int
     max_amperage: int
+    max_power_watts: int | None = None
     tariff_id: int | None
 
     @field_validator("power_type", mode="before")

@@ -36,6 +36,9 @@ class CatalogSyncRequest(BaseModel):
     city: str
     state: str
     country: str
+    # Site name from the CSMS location assigned to the charger (optional; the
+    # tenant-level billing-address row has none).
+    location_name: Optional[str] = None
 
     # EVSE / station
     station_id: str  # CitrineOS ocppConnectionName
@@ -57,6 +60,8 @@ class CatalogSyncRequest(BaseModel):
     power_type: ConnectorPowerType = ConnectorPowerType(DEFAULT_POWER_TYPE)
     max_voltage: int = DEFAULT_MAX_VOLTAGE
     max_amperage: int = DEFAULT_MAX_AMPERAGE
+    # Nameplate rating in watts; omitted = keep whatever is stored.
+    max_power_watts: Optional[int] = None
 
     # Plug-and-charge opt-in: sessions that start unauthorized on this EVSE
     # (cable plug-in autostart) are allowed to run and pay via the transaction

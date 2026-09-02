@@ -44,6 +44,9 @@ class Connector(Base):
     power_type = Column(String(20), nullable=False)
     max_voltage = Column(Integer, nullable=False)
     max_amperage = Column(Integer, nullable=False)
+    # Nameplate rating from the CSMS (Connectors.maximumPowerWatts). When set it
+    # is displayed directly; the voltage*amperage estimate is only a fallback.
+    max_power_watts = Column(Integer)
 
     evse_id = Column(Integer, ForeignKey(f"{Config.DB_TABLE_PREFIX}evses.id"))
     evse = relationship("Evse", back_populates="connectors")
@@ -95,6 +98,9 @@ class Location(Base):
     id = Column(Integer, primary_key=True, autoincrement="auto", index=True)
     location_id = Column(String(36), index=True, nullable=False, unique=True)
 
+    # Site name from the CSMS Locations table (e.g. "Main St Garage"); NULL for
+    # legacy tenant-level rows that only carry the business/billing address.
+    name = Column(String(255))
     address = Column(
         String(255),
     )
@@ -269,6 +275,18 @@ def init_db() -> None:
     # payment_evses idempotently.
     evses_table = f"{Config.DB_TABLE_PREFIX}evses"
     with engine.begin() as conn:
+        conn.execute(
+            text(
+                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}locations" '
+                "ADD COLUMN IF NOT EXISTS name VARCHAR(255)"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}connectors" '
+                "ADD COLUMN IF NOT EXISTS max_power_watts INTEGER"
+            )
+        )
         conn.execute(
             text(
                 f'ALTER TABLE "{evses_table}" '

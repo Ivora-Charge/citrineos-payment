@@ -74,6 +74,8 @@ async def sync_catalog(
             power_type=payload.power_type.value,
             max_voltage=payload.max_voltage,
             max_amperage=payload.max_amperage,
+            max_power_watts=payload.max_power_watts,
+            location_name=payload.location_name,
             plug_and_charge=payload.plug_and_charge,
         )
 

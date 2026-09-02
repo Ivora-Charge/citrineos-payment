@@ -6,6 +6,7 @@ from schemas.operators import Operator
 class LocationBase(BaseModel):
     id: int
     location_id: str
+    name: str | None = None
     address: str | None
     postal_code: str | None
     city: str | None
