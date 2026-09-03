@@ -189,7 +189,9 @@ export default function Checkout() {
           )}
 
           <div className="charger-ref">
-            {evseId} · max{' '}
+            {/* A named charger shows its plug, not the hardware id (the
+                serial the host never chose); unnamed ones keep the id. */}
+            {state.name ? `Plug ${evseId.split('-').pop()}` : evseId} · max{' '}
             {state.max_power_watts
               ? Math.round((state.max_power_watts / 1000 + Number.EPSILON) * 100) /
                 100
