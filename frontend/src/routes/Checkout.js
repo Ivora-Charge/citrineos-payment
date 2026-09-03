@@ -170,12 +170,20 @@ export default function Checkout() {
             <div className="charger-place">
               <i className="ri-map-pin-line" />
               <span>
-                {state.name ? `${state.name} — ` : ''}
-                {state.address}
-                {state.postal_code || state.city
-                  ? `, ${[state.postal_code, state.city].filter(Boolean).join(' ')}`
-                  : ''}
-                {state.state ? `, ${state.state}` : ''}
+                {/* Hosts may leave the address blank: show only what exists,
+                    with no dangling separators. */}
+                {[
+                  state.name,
+                  [
+                    state.address,
+                    [state.postal_code, state.city].filter(Boolean).join(' '),
+                    state.state,
+                  ]
+                    .filter(Boolean)
+                    .join(', '),
+                ]
+                  .filter(Boolean)
+                  .join(' — ')}
               </span>
             </div>
           )}
