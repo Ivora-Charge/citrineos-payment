@@ -34,6 +34,8 @@ def create_checkout(request_body: CheckoutCreate, db: Session = Depends(get_db))
     evse = db.query(EvseModel).filter(EvseModel.evse_id == request_body.evse_id).first()
     if evse is None:
         raise HTTPException(status_code=404, detail="EVSE not found")
+    if getattr(evse, "retired_at", None) is not None:
+        raise HTTPException(status_code=410, detail="This charger is no longer in service")
 
     tariff = (
         db.query(TariffModel)

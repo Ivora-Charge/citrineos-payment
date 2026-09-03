@@ -208,6 +208,10 @@ def upsert_payment_catalog(
         defaults=evse_defaults,
     )
     ensure_phone_code(db, evse)
+    # A sync brings a removed (retired) charger back into service.
+    if getattr(evse, "retired_at", None) is not None:
+        evse.retired_at = None
+        db.add(evse)
 
     # max_power_watts is tri-state like plug_and_charge: None (absent from the
     # payload) leaves a previously-synced rating alone rather than clearing it.

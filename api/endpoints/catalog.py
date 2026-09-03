@@ -161,6 +161,34 @@ async def sync_station(_: None = Depends(require_sync_secret)):
     )
 
 
+@router.post("/retire-station")
+async def retire_station(
+    station_id: str = Query(...),
+    tenant_id: str = Query(...),
+    _: None = Depends(require_sync_secret),
+    db: Session = Depends(get_db),
+):
+    """Take a station's EVSEs out of service (host removed the charger from
+    the platform). Rows stay because checkout history references them; the
+    checkout page and new checkouts answer 410 until the next catalog sync
+    for the station clears retired_at."""
+    from datetime import datetime, timezone
+
+    evses = (
+        db.query(EvseModel)
+        .filter(EvseModel.station_id == station_id, EvseModel.tenant_id == tenant_id)
+        .all()
+    )
+    now = datetime.now(timezone.utc)
+    for evse in evses:
+        evse.retired_at = now
+        evse.status = "Unavailable"
+        db.add(evse)
+    db.commit()
+    info(f" [catalog] retired {len(evses)} EVSE(s) of station {station_id} (tenant {tenant_id})")
+    return {"retired": len(evses)}
+
+
 @router.post("/reassign-station")
 async def reassign_station(
     station_id: str = Query(...),

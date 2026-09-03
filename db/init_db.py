@@ -64,6 +64,10 @@ class Evse(Base):
     status = Column(String(48), nullable=False)
     station_id = Column(String(255), nullable=False)
     tenant_id = Column(String(3), nullable=False)
+    # Set when the host removed the charger from the platform: the EVSE stays
+    # (checkout history references its connectors) but the checkout page and
+    # new checkouts answer 410 until a catalog sync brings it back.
+    retired_at = Column(DateTime(timezone=True))
 
     # Standing "scan to pay" QR shown on the idle charger display. display_message_id
     # is the OCPP SetDisplayMessage id currently on screen (so it can be cleared /
@@ -297,6 +301,12 @@ def init_db() -> None:
             text(
                 f'ALTER TABLE "{evses_table}" '
                 "ADD COLUMN IF NOT EXISTS qr_image_url VARCHAR(512)"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{evses_table}" '
+                "ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ"
             )
         )
         # Rename the legacy column to display_adapter_type if it's still around
