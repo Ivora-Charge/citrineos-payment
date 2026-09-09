@@ -26,6 +26,7 @@ import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
+from utils.platform_fees import checkout_rate
 from config import Config
 from db.init_db import (
     get_db,
@@ -284,7 +285,8 @@ async def confirm(request: Request, db: Session = Depends(get_db)):
     connector, tariff, location = chain
 
     db_checkout = CheckoutModel(
-        connector_id=connector.id, tariff_id=tariff.id, source="ivr"
+        connector_id=connector.id, tariff_id=tariff.id, source="ivr",
+        platform_fee_bps=checkout_rate(db, evse, location.operator.stripe_account_id)
     )
     db.add(db_checkout)
     db.commit()

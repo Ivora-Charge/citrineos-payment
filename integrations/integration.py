@@ -7,6 +7,7 @@ import requests
 import stripe
 from sqlalchemy.orm import Session
 
+from utils.platform_fees import fee_kwargs
 from config import Config
 from db.init_db import get_db, Checkout, Connector, Evse, Location, Operator
 from utils.receipt_email import send_receipt_email
@@ -143,9 +144,12 @@ class OcppIntegration:
             db.commit()
             return
 
+        commission = fee_kwargs(amount_to_capture, db_checkout.platform_fee_bps,
+                                db_operator.stripe_account_id)
         suc_intent = stripe.PaymentIntent.capture(
             intent=db_checkout.payment_intent_id,
             amount_to_capture=amount_to_capture,
+            **commission,
             **stripe_account_kwargs(db_operator.stripe_account_id),
         )
 
@@ -158,6 +162,7 @@ class OcppIntegration:
         info(f"CAPTURE SUCCESS - Captured the costs for Checkout: {db_checkout.id}")
         db_checkout.captured_at = datetime.now(timezone.utc)
         db_checkout.captured_amount = int(amount_to_capture)
+        db_checkout.platform_fee_amount = commission.get("application_fee_amount", 0)
         db.add(db_checkout)
         db.commit()
 
@@ -205,8 +210,11 @@ class OcppIntegration:
             return
 
         try:
+            commission = fee_kwargs(overage_subunits, db_checkout.platform_fee_bps,
+                                    db_operator.stripe_account_id)
             overage_intent = stripe.PaymentIntent.create(
                 amount=int(overage_subunits),
+                **commission,
                 currency=pricing.currency.lower(),
                 customer=customer_id,
                 payment_method=payment_method_id,
@@ -218,6 +226,7 @@ class OcppIntegration:
             db_checkout.overage_payment_intent_id = overage_intent.id
             if overage_intent.status == "succeeded":
                 db_checkout.overage_amount = int(overage_subunits)
+                db_checkout.overage_platform_fee_amount = commission.get("application_fee_amount", 0)
             db.add(db_checkout)
             db.commit()
             info(

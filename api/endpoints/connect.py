@@ -17,12 +17,13 @@ from typing import Optional
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, conint
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from api.endpoints.catalog import require_sync_secret
-from db.init_db import get_db
+from db.init_db import get_db, TenantPlatformFee
+from utils.platform_fees import tenant_rate
 
 router = APIRouter()
 
@@ -167,3 +168,27 @@ async def connect_status(tenant_id: int, db: Session = Depends(get_db)):
             default_currency=account.get("default_currency"),
         ),
     )
+
+
+class PlatformFeeRequest(BaseModel):
+    basis_points: conint(strict=True, ge=0, le=10000)
+
+
+@router.get("/platform-fee", dependencies=[Depends(require_sync_secret)])
+def get_platform_fee(tenant_id: int, db: Session = Depends(get_db)):
+    _tenant_account_id(db, tenant_id)  # also validates that the tenant exists
+    return {"tenant_id": tenant_id, "basis_points": tenant_rate(db, tenant_id)}
+
+
+@router.put("/platform-fee", dependencies=[Depends(require_sync_secret)])
+def set_platform_fee(payload: PlatformFeeRequest, tenant_id: int, db: Session = Depends(get_db)):
+    _tenant_account_id(db, tenant_id)
+    # Atomic upsert: concurrent administrators cannot create duplicate rows.
+    from sqlalchemy.dialects.postgresql import insert
+    statement = insert(TenantPlatformFee).values(tenant_id=tenant_id, basis_points=payload.basis_points)
+    db.execute(statement.on_conflict_do_update(
+        index_elements=[TenantPlatformFee.tenant_id],
+        set_={"basis_points": payload.basis_points},
+    ))
+    db.commit()
+    return {"tenant_id": tenant_id, "basis_points": payload.basis_points}

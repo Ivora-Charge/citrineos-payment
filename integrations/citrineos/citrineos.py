@@ -14,6 +14,7 @@ from sqlalchemy import func as sql_func, text as sql_text
 from sqlalchemy.orm import Session
 import stripe
 
+from utils.platform_fees import checkout_rate
 from config import Config
 from logging import debug, exception, info, warning
 from db.init_db import (
@@ -940,7 +941,8 @@ class CitrineOSIntegration(OcppIntegration):
             raise Exception("No Location for EVSE found")
 
         db_checkout = CheckoutModel(
-            connector_id=evse.connectors[0].id, tariff_id=tariff.id
+            connector_id=evse.connectors[0].id, tariff_id=tariff.id,
+            platform_fee_bps=checkout_rate(db, evse, location.operator.stripe_account_id)
         )
         db_checkout = self.update_checkout_with_meter_values(
             transaction_event=transaction_event, db_checkout=db_checkout

@@ -157,6 +157,7 @@ class PlugAndChargeGuardTests(unittest.TestCase):
         # exists and the transaction QR was pushed.
         checkout = self.db.query(Checkout).one()
         self.assertEqual(checkout.qr_code_message_id, 1)
+        self.assertEqual(checkout.platform_fee_bps, 1000)
         self.integration.create_payment_link.assert_awaited_once()
 
 

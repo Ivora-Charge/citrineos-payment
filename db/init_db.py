@@ -3,6 +3,7 @@ from config import Config
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     UniqueConstraint,
     create_engine,
     Column,
@@ -30,6 +31,14 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+
+class TenantPlatformFee(Base):
+    """Platform-controlled rates, deliberately not exposed through Hasura."""
+    __tablename__ = f"{Config.DB_TABLE_PREFIX}tenant_platform_fees"
+    tenant_id = Column(Integer, primary_key=True)
+    basis_points = Column(Integer, nullable=False)
+    __table_args__ = (CheckConstraint("basis_points >= 0 AND basis_points <= 10000"),)
 
 
 class Connector(Base):
@@ -159,6 +168,10 @@ class Checkout(Base):
     __tablename__ = f"{Config.DB_TABLE_PREFIX}checkouts"
 
     id = Column(Integer, primary_key=True, autoincrement="auto", index=True)
+    # NULL means a checkout predating platform fees; preserve its original terms.
+    platform_fee_bps = Column(Integer)
+    platform_fee_amount = Column(Integer)
+    overage_platform_fee_amount = Column(Integer)
     payment_intent_id = Column(String(255), index=True, unique=True)
     # Second off-session PaymentIntent that bills cost above the captured hold
     # (the overage charge). NULL until/unless an overage is charged; set so a
@@ -284,6 +297,11 @@ def init_db() -> None:
     # payment_evses idempotently.
     evses_table = f"{Config.DB_TABLE_PREFIX}evses"
     with engine.begin() as conn:
+        for column in ("platform_fee_bps", "platform_fee_amount", "overage_platform_fee_amount"):
+            conn.execute(text(
+                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
+                f'ADD COLUMN IF NOT EXISTS {column} INTEGER'
+            ))
         conn.execute(
             text(
                 f'ALTER TABLE "{Config.DB_TABLE_PREFIX}locations" '

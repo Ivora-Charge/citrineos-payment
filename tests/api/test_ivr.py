@@ -291,6 +291,7 @@ class ConfirmTests(IvrTestCase):
         db.close()
         self.assertIsNotNone(checkout)
         self.assertEqual(checkout.source, "ivr")
+        self.assertEqual(checkout.platform_fee_bps, 0)
         self.assertIn('tokenType="reusable"', response.text)
         self.assertNotIn("chargeAmount", response.text)
         self.assertIn(f'action="pay?checkout={checkout.id}"', response.text)
@@ -302,6 +303,8 @@ class ConfirmTests(IvrTestCase):
             f"/api/ivr/confirm?evse={self.evse_pk('654321')}", {"Digits": "1"}
         )
         self.assertIn('paymentConnector="acct_123"', response.text)
+        with self.db() as db:
+            self.assertEqual(db.query(Checkout).first().platform_fee_bps, 1000)
 
     def test_press_2_asks_for_new_code(self):
         response = post(

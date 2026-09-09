@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from utils.platform_fees import checkout_rate
 from config import Config
 from db.init_db import (
     get_db,
@@ -60,7 +61,8 @@ def create_checkout(request_body: CheckoutCreate, db: Session = Depends(get_db))
     if location is None:
         raise HTTPException(status_code=404, detail="No Location for EVSE found")
 
-    db_checkout = CheckoutModel(connector_id=evse.connectors[0].id, tariff_id=tariff.id)
+    db_checkout = CheckoutModel(connector_id=evse.connectors[0].id, tariff_id=tariff.id,
+                                platform_fee_bps=checkout_rate(db, evse, location.operator.stripe_account_id))
     db.add(db_checkout)
     db.commit()
     db.refresh(db_checkout)
