@@ -69,5 +69,13 @@
   "checkout.transactionfee": "Kartentransaktionsgebühr",
   "charging.transactionfee": "Transaktionsgebühr (enthalten)",
   "receipt.transactionfee": "Transaktionsgebühr",
-  "receipt.totaldue": "Gesamt inkl. Transaktionsgebühr"
+  "receipt.totaldue": "Gesamt inkl. Transaktionsgebühr",
+  "checkout.free.link": "Betreiber oder Admin? Kostenlose Sitzung starten",
+  "checkout.free.hint": "Gib das Freilade-Passwort dieser Ladestation ein. Keine Karte nötig, es wird nichts berechnet.",
+  "checkout.free.placeholder": "Passwort",
+  "checkout.free.button": "Kostenlos starten",
+  "checkout.free.cancel": "Abbrechen",
+  "checkout.free.error.password": "Falsches Passwort.",
+  "checkout.free.error.locked": "Zu viele falsche Passwörter. Versuche es in 15 Minuten erneut.",
+  "checkout.free.error.unavailable": "Kostenloses Laden ist an dieser Ladestation nicht aktiviert."
 }

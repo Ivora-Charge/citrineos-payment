@@ -77,10 +77,12 @@ async def sync_catalog(
             max_power_watts=payload.max_power_watts,
             location_name=payload.location_name,
             plug_and_charge=payload.plug_and_charge,
+            free_charge_enabled=payload.free_charge_enabled,
+            free_charge_password_hash=payload.free_charge_password_hash,
         )
 
         info(f" [catalog] SYNC SUCCESS for evse_id={payload.evse_id}")
-        info(f" [catalog] payload={payload}")
+        info(f" [catalog] payload={payload.model_dump(exclude={'free_charge_password_hash'})}")
         db.commit()
     except Exception as exc:  # noqa: BLE001 - surface as 500, keep the DB clean
         db.rollback()

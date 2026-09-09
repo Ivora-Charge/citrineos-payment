@@ -69,5 +69,13 @@
   "checkout.transactionfee": "card transaction fee",
   "charging.transactionfee": "Transaction fee (included)",
   "receipt.transactionfee": "Transaction fee",
-  "receipt.totaldue": "Total incl. transaction fee"
+  "receipt.totaldue": "Total incl. transaction fee",
+  "checkout.free.link": "Host or admin? Start a free session",
+  "checkout.free.hint": "Enter this charger's free-charging password. No card is needed and nothing is charged.",
+  "checkout.free.placeholder": "Password",
+  "checkout.free.button": "Start free session",
+  "checkout.free.cancel": "Cancel",
+  "checkout.free.error.password": "Wrong password.",
+  "checkout.free.error.locked": "Too many wrong passwords. Try again in 15 minutes.",
+  "checkout.free.error.unavailable": "Free charging is not enabled on this charger."
 }

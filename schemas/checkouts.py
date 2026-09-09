@@ -22,6 +22,18 @@ class CheckoutCreateResponse(CheckoutBase):
     url: str
 
 
+class FreeCheckoutCreate(BaseModel):
+    """Admin free charging: start a session with the charger's password
+    instead of a card (api/endpoints/checkouts.py start_free_checkout)."""
+
+    evse_id: str
+    password: str
+
+
+class FreeCheckoutResponse(CheckoutBase):
+    remote_request_status: RequestStartStopStatusEnumType | None = None
+
+
 class Pricing(BaseModel):
     currency: str
     # Percentages -- fractional rates (e.g. tax_rate=7.625, payment_fee=0.25)

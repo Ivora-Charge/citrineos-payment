@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from logging import error, info, warning
 
 import requests
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from config import Config
@@ -65,7 +65,9 @@ async def _reap_once(ocpp_integration) -> None:
         stuck = (
             db.query(Checkout)
             .filter(
-                Checkout.payment_intent_id.isnot(None),
+                # Paid sessions (a hold to rescue) and admin free sessions
+                # (no hold, but the page would show "charging" forever).
+                or_(Checkout.payment_intent_id.isnot(None), Checkout.source == "free"),
                 Checkout.captured_at.is_(None),
                 Checkout.transaction_end_time.is_(None),
                 Checkout.transaction_start_time.isnot(None),

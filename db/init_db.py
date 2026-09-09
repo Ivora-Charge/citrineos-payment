@@ -89,6 +89,11 @@ class Evse(Base):
     # SCAN_AND_CHARGE_REQUIRE_PREPAYMENT policy; the driver pays via the
     # transaction QR while charging.
     plug_and_charge = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # Admin free charging (utils/free_charge.py): the host lets whoever knows
+    # a password start a session without paying. Both come from platform-api
+    # with the catalog sync; the checkout page verifies against the hash.
+    free_charge_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    free_charge_password_hash = Column(String(255))
 
     connectors = relationship("Connector", back_populates="evse")
 
@@ -341,6 +346,18 @@ def init_db() -> None:
             text(
                 f'ALTER TABLE "{evses_table}" '
                 "ADD COLUMN IF NOT EXISTS plug_and_charge BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{evses_table}" '
+                "ADD COLUMN IF NOT EXISTS free_charge_enabled BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        )
+        conn.execute(
+            text(
+                f'ALTER TABLE "{evses_table}" '
+                "ADD COLUMN IF NOT EXISTS free_charge_password_hash VARCHAR(255)"
             )
         )
         conn.execute(

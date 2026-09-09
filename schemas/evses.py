@@ -20,4 +20,7 @@ class Evse(BaseModel):
     ocpp_evse_id: int
     status: EvseStatus
     location_id: int
+    # Admin free charging is offered on the checkout page when true; the
+    # password hash itself is never exposed.
+    free_charge_enabled: bool = False
     connectors: list[Connector] = []

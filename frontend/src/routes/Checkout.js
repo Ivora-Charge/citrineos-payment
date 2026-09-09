@@ -35,6 +35,13 @@ export default function Checkout() {
     initializing: true,
     status: 'UNKNOWN',
     modalVisible: false,
+    // Admin free charging (enabled per charger in Charger Management): a
+    // password field instead of the card flow. free_charge_enabled arrives
+    // with the EVSE payload.
+    freeOpen: false,
+    freePassword: '',
+    freeLoading: false,
+    freeErr: null,
   });
   const navigate = useNavigate();
   const intl = useIntl();
@@ -141,6 +148,39 @@ export default function Checkout() {
           ...state,
           loading: false,
           errMsg: intl.formatMessage({ id: 'global.error.generic' }),
+        });
+      });
+  };
+
+  // Admin free charging: verify the charger's password on the payment API
+  // and go straight to the charging page; no Stripe, no hold.
+  const onFreeStart = (ev) => {
+    if (ev) ev.preventDefault();
+    if (!state.freePassword) return;
+    setState({ ...state, freeLoading: true, freeErr: null });
+    axios
+      .post(`checkouts/free`, { evse_id: evseId, password: state.freePassword })
+      .then(({ data }) => {
+        if (data?.id) {
+          navigate(`/charging/${evseId}/${data.id}`);
+        } else {
+          setState({
+            ...state,
+            freeLoading: false,
+            freeErr: intl.formatMessage({ id: 'global.error.generic' }),
+          });
+        }
+      })
+      .catch((e) => {
+        const detail = e.response?.data?.detail;
+        const id =
+          typeof detail === 'string' && detail.startsWith('checkout.free.')
+            ? detail
+            : 'global.error.generic';
+        setState({
+          ...state,
+          freeLoading: false,
+          freeErr: intl.formatMessage({ id }),
         });
       });
   };
@@ -310,6 +350,76 @@ export default function Checkout() {
             <i className="ri-lock-2-line" />
             {intl.formatMessage({ id: 'checkout.securedbystripe' })}
           </div>
+
+          {state.free_charge_enabled && !payNowUrl && (
+            <div className="free-charge">
+              {!state.freeOpen ? (
+                <a
+                  href="#free"
+                  onClick={(ev) => {
+                    ev.preventDefault();
+                    setState({ ...state, freeOpen: true, freeErr: null });
+                  }}
+                >
+                  <i className="ri-key-2-line" />{' '}
+                  {intl.formatMessage({ id: 'checkout.free.link' })}
+                </a>
+              ) : (
+                <form className="free-charge__form" onSubmit={onFreeStart}>
+                  <div className="free-charge__hint">
+                    {intl.formatMessage({ id: 'checkout.free.hint' })}
+                  </div>
+                  <input
+                    className="free-charge__input"
+                    type="password"
+                    autoComplete="off"
+                    autoFocus
+                    placeholder={intl.formatMessage({
+                      id: 'checkout.free.placeholder',
+                    })}
+                    value={state.freePassword}
+                    onChange={(ev) =>
+                      setState({
+                        ...state,
+                        freePassword: ev.target.value,
+                        freeErr: null,
+                      })
+                    }
+                  />
+                  <Button
+                    className="cta-button free-charge__button"
+                    color="primary"
+                    fill="outline"
+                    block
+                    loading={state.freeLoading}
+                    disabled={!state.freePassword}
+                    onClick={onFreeStart}
+                  >
+                    <i className="ri-flashlight-line" />{' '}
+                    {intl.formatMessage({ id: 'checkout.free.button' })}
+                  </Button>
+                  {state.freeErr && (
+                    <div className="checkout-error">{state.freeErr}</div>
+                  )}
+                  <a
+                    href="#cancel"
+                    className="free-charge__cancel"
+                    onClick={(ev) => {
+                      ev.preventDefault();
+                      setState({
+                        ...state,
+                        freeOpen: false,
+                        freePassword: '',
+                        freeErr: null,
+                      });
+                    }}
+                  >
+                    {intl.formatMessage({ id: 'checkout.free.cancel' })}
+                  </a>
+                </form>
+              )}
+            </div>
+          )}
         </Skeleton>
       </div>
 

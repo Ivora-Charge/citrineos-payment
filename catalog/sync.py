@@ -81,6 +81,8 @@ def upsert_payment_catalog(
     max_power_watts: Optional[int] = None,
     location_name: Optional[str] = None,
     plug_and_charge: "bool | None" = None,
+    free_charge_enabled: "bool | None" = None,
+    free_charge_password_hash: "str | None" = None,
 ) -> dict:
     """Upsert the full operator -> location -> tariff -> evse -> connector chain.
 
@@ -201,6 +203,13 @@ def upsert_payment_catalog(
     }
     if plug_and_charge is not None:
         evse_defaults["plug_and_charge"] = plug_and_charge
+    # Same tri-state for admin free charging; the hash travels with the flag
+    # so a disable also drops the hash from this side.
+    if free_charge_enabled is not None:
+        evse_defaults["free_charge_enabled"] = bool(free_charge_enabled)
+        evse_defaults["free_charge_password_hash"] = (
+            free_charge_password_hash if free_charge_enabled else None
+        )
     evse, evse_created = get_or_create(
         db,
         Evse,

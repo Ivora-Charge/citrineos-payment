@@ -1,10 +1,12 @@
 import asyncio
+from logging import error, info
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from config import Config
 from db.init_db import (
     get_db,
     SessionLocal,
@@ -15,8 +17,15 @@ from db.init_db import (
     Checkout as CheckoutModel,
 )
 
-from schemas.checkouts import Checkout, CheckoutCreate, CheckoutCreateResponse
-from utils import live
+from schemas.checkouts import (
+    Checkout,
+    CheckoutCreate,
+    CheckoutCreateResponse,
+    FreeCheckoutCreate,
+    FreeCheckoutResponse,
+    RequestStartStopStatusEnumType,
+)
+from utils import free_charge, live
 from utils.utils import generate_pricing, stripe_account_kwargs
 
 router = APIRouter()
@@ -92,6 +101,120 @@ def create_checkout(request_body: CheckoutCreate, db: Session = Depends(get_db))
     return CheckoutCreateResponse(
         id=db_checkout.id,
         url=checkout.url,
+    )
+
+
+def _free_tariff(db: Session, currency: str) -> TariffModel:
+    """The all-zero tariff free sessions are priced with, one per currency.
+    Pricing, the charging page, the receipt and the revenue stats all read
+    the checkout's tariff, so a zero tariff keeps every one of them honest
+    without special cases."""
+    values = {
+        "currency": currency,
+        "tax_rate": 0.0,
+        "authorization_amount": 0.0,
+        "price_kwh": 0.0,
+        "price_minute": 0.0,
+        "price_session": 0.0,
+        "payment_fee": 0.0,
+    }
+    tariff = db.query(TariffModel).filter_by(**values).first()
+    if tariff is None:
+        tariff = TariffModel(**values)
+        db.add(tariff)
+        db.flush()
+    return tariff
+
+
+@router.post("/free", response_model=FreeCheckoutResponse)
+async def start_free_checkout(
+    request_body: FreeCheckoutCreate, request: Request, db: Session = Depends(get_db)
+):
+    """Admin free charging: start a session on the EVSE with the charger's
+    free-charge password instead of a card.
+
+    The host enables this per charger in Charger Management (platform-api
+    pushes the flag and password hash with the catalog sync). The session is
+    a normal remote start tied to a checkout with no PaymentIntent and a
+    zero tariff, so the charging page, settlement (which skips Stripe when
+    there is no hold) and reporting all work unchanged; it shows up as a
+    session with zero revenue."""
+    evse = db.query(EvseModel).filter(EvseModel.evse_id == request_body.evse_id).first()
+    if evse is None:
+        raise HTTPException(status_code=404, detail="EVSE not found")
+    if getattr(evse, "retired_at", None) is not None:
+        raise HTTPException(status_code=410, detail="This charger is no longer in service")
+    if not evse.free_charge_enabled or not evse.free_charge_password_hash:
+        raise HTTPException(status_code=404, detail="checkout.free.error.unavailable")
+    if not evse.connectors:
+        raise HTTPException(status_code=404, detail="No connector for EVSE found")
+
+    if free_charge.is_locked(evse.evse_id):
+        raise HTTPException(status_code=429, detail="checkout.free.error.locked")
+    if not free_charge.verify_password(request_body.password, evse.free_charge_password_hash):
+        free_charge.record_failure(evse.evse_id)
+        raise HTTPException(status_code=401, detail="checkout.free.error.password")
+    free_charge.clear_failures(evse.evse_id)
+
+    paid_tariff = (
+        db.query(TariffModel).filter(TariffModel.id == evse.connectors[0].tariff_id).first()
+    )
+    currency = (paid_tariff.currency if paid_tariff is not None else "usd").lower()
+    tariff = _free_tariff(db, currency)
+    db_checkout = CheckoutModel(
+        connector_id=evse.connectors[0].id,
+        tariff_id=tariff.id,
+        source="free",
+        authorization_amount=0,
+    )
+    db.add(db_checkout)
+    db.commit()
+    db.refresh(db_checkout)
+
+    # Same remote-start shape as the paid web flow (webhooks.handle_web_portal):
+    # a PAY_<checkout> idTag in the station's tenant, so 1.6 chargers link
+    # the session back to this checkout through the idTag prefix too.
+    ocpp_integration = request.app.ocpp_integration
+    authorization = await ocpp_integration.create_authorization(
+        f"{Config.OCPP_REMOTESTART_IDTAG_PREFIX}{db_checkout.id}",
+        "Central",
+        [(str(db_checkout.id), "FreeChargeCheckoutId")],
+        tenant_id=evse.tenant_id,
+    )
+    if authorization is None:
+        error(" [free] unable to create authorization for checkout %s", db_checkout.id)
+        raise HTTPException(status_code=502, detail="charging.error.generic")
+
+    # Local import: webhooks.py is unrelated at import time but shares the app.
+    from api.endpoints.webhooks import citrineos_call_succeeded
+
+    response = ocpp_integration.send_citrineos_message(
+        station_id=evse.station_id,
+        tenant_id=evse.tenant_id,
+        url_path="evdriver/requestStartTransaction",
+        json_payload={
+            "remoteStartId": db_checkout.id,
+            "idToken": authorization["idToken"],
+            "evseId": evse.ocpp_evse_id,
+        },
+    )
+    db_checkout.remote_request_status = (
+        RequestStartStopStatusEnumType.ACCEPTED
+        if citrineos_call_succeeded(response)
+        else RequestStartStopStatusEnumType.REJECTED
+    )
+    db.add(db_checkout)
+    db.commit()
+    db.refresh(db_checkout)
+    live.notify(db_checkout.id)
+    info(
+        " [free] checkout %s on %s: remote start %s",
+        db_checkout.id,
+        evse.evse_id,
+        db_checkout.remote_request_status,
+    )
+    return FreeCheckoutResponse(
+        id=db_checkout.id, remote_request_status=db_checkout.remote_request_status
     )
 
 

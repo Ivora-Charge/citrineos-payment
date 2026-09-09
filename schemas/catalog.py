@@ -70,6 +70,13 @@ class CatalogSyncRequest(BaseModel):
     # without the field can't reset an operator's opt-in).
     plug_and_charge: Optional[bool] = None
 
+    # Admin free charging (utils/free_charge.py). Tri-state like
+    # plug_and_charge: omitted = leave the stored pair alone. When
+    # free_charge_enabled is given, free_charge_password_hash is written with
+    # it (None clears the hash), so the pair always mirrors platform-api.
+    free_charge_enabled: Optional[bool] = None
+    free_charge_password_hash: Optional[str] = None
+
     @field_validator("power_type", mode="before")
     @classmethod
     def normalize_power_type(cls, v):

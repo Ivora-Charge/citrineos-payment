@@ -48,6 +48,20 @@ class OcppIntegration:
             )
             return
 
+        # Admin free charging (api/endpoints/checkouts.py start_free_checkout):
+        # nothing was authorized, so there is nothing to capture. Mark it
+        # settled so the page, the reaper and the stats treat it as closed.
+        if db_checkout.payment_intent_id is None:
+            info(
+                f" [integrations] Checkout {checkout_id}: free session "
+                f"(source={db_checkout.source!r}); settling without Stripe."
+            )
+            db_checkout.captured_at = datetime.now(timezone.utc)
+            db_checkout.captured_amount = 0
+            db.add(db_checkout)
+            db.commit()
+            return
+
         # Resolve the operator via the checkout's connector -> evse -> location ->
         # operator chain. The previous query cross-joined Operator without linking
         # Location.operator_id, so with more than one operator it returned an
