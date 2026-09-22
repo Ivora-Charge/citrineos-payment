@@ -107,6 +107,9 @@ class AppConfig:
     # packet the CSMS saw as the end time. Card-not-present holds expire after
     # ~7 days, so keep the threshold comfortably below that.
     REAPER_ENABLED: bool = True
+    # Energy/power activity, not browser refreshes or charger heartbeats.
+    PAYMENT_INACTIVITY_SECONDS: int = 300
+    PAYMENT_RECOVERY_INTERVAL_SECONDS: int = 5
     REAPER_STALE_HOURS: int = 48
     REAPER_INTERVAL_MINUTES: int = 30
     # Close core OCPP Transactions still flagged isActive after their station

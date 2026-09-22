@@ -74,3 +74,11 @@ class Checkout(CheckoutBase):
     # Live connector state of the checkout's EVSE ('Available' / 'Occupied' /
     # ...), so the pre-start page can say "Preparing" without a second request.
     evse_status: str | None = None
+    captured_at: datetime | None = None
+    captured_amount: int | None = None
+    canceled_at: datetime | None = None
+    cancellation_requested_at: datetime | None = None
+    cancellation_reason: str | None = None
+    authorized_at: datetime | None = None
+    inactivity_deadline: datetime | None = None
+    stop_requested_at: datetime | None = None

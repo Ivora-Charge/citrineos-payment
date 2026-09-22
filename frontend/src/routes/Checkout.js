@@ -155,8 +155,12 @@ export default function Checkout() {
   // Admin free charging: verify the charger's password on the payment API
   // and go straight to the charging page; no Stripe, no hold.
   const onFreeStart = (ev) => {
-    if (ev) ev.preventDefault();
-    if (!state.freePassword) return;
+    if (ev) {
+      ev.preventDefault();
+    }
+    if (!state.freePassword) {
+      return;
+    }
     setState({ ...state, freeLoading: true, freeErr: null });
     axios
       .post(`checkouts/free`, { evse_id: evseId, password: state.freePassword })
@@ -233,8 +237,9 @@ export default function Checkout() {
                 serial the host never chose); unnamed ones keep the id. */}
             {state.name ? `Plug ${evseId.split('-').pop()}` : evseId} · max{' '}
             {state.max_power_watts
-              ? Math.round((state.max_power_watts / 1000 + Number.EPSILON) * 100) /
-                100
+              ? Math.round(
+                  (state.max_power_watts / 1000 + Number.EPSILON) * 100,
+                ) / 100
               : getConnectorPowerKw(
                   state.max_voltage,
                   state.max_amperage,

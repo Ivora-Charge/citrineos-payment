@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from logging import error, info
 
 import stripe
@@ -28,6 +29,12 @@ from schemas.checkouts import (
 )
 from utils import free_charge, live
 from utils.utils import generate_pricing, stripe_account_kwargs
+from utils.payment_lifecycle import (
+    cancel_checkout,
+    locked_checkout,
+    inactivity_deadline,
+    reconcile_core_transaction,
+)
 
 router = APIRouter()
 
@@ -45,7 +52,9 @@ def create_checkout(request_body: CheckoutCreate, db: Session = Depends(get_db))
     if evse is None:
         raise HTTPException(status_code=404, detail="EVSE not found")
     if getattr(evse, "retired_at", None) is not None:
-        raise HTTPException(status_code=410, detail="This charger is no longer in service")
+        raise HTTPException(
+            status_code=410, detail="This charger is no longer in service"
+        )
 
     tariff = (
         db.query(TariffModel)
@@ -61,8 +70,12 @@ def create_checkout(request_body: CheckoutCreate, db: Session = Depends(get_db))
     if location is None:
         raise HTTPException(status_code=404, detail="No Location for EVSE found")
 
-    db_checkout = CheckoutModel(connector_id=evse.connectors[0].id, tariff_id=tariff.id,
-                                platform_fee_bps=checkout_rate(db, evse, location.operator.stripe_account_id))
+    db_checkout = CheckoutModel(
+        connector_id=evse.connectors[0].id,
+        tariff_id=tariff.id,
+        stripe_account_id=location.operator.stripe_account_id,
+        platform_fee_bps=checkout_rate(db, evse, location.operator.stripe_account_id),
+    )
     db.add(db_checkout)
     db.commit()
     db.refresh(db_checkout)
@@ -96,6 +109,7 @@ def create_checkout(request_body: CheckoutCreate, db: Session = Depends(get_db))
         cancel_url=request_body.cancel_url,
     )
     db_checkout.payment_intent_id = checkout.payment_intent
+    db_checkout.stripe_checkout_session_id = getattr(checkout, "id", None)
     db.add(db_checkout)
     db.commit()
     db.refresh(db_checkout)
@@ -145,7 +159,9 @@ async def start_free_checkout(
     if evse is None:
         raise HTTPException(status_code=404, detail="EVSE not found")
     if getattr(evse, "retired_at", None) is not None:
-        raise HTTPException(status_code=410, detail="This charger is no longer in service")
+        raise HTTPException(
+            status_code=410, detail="This charger is no longer in service"
+        )
     if not evse.free_charge_enabled or not evse.free_charge_password_hash:
         raise HTTPException(status_code=404, detail="checkout.free.error.unavailable")
     if not evse.connectors:
@@ -153,13 +169,17 @@ async def start_free_checkout(
 
     if free_charge.is_locked(evse.evse_id):
         raise HTTPException(status_code=429, detail="checkout.free.error.locked")
-    if not free_charge.verify_password(request_body.password, evse.free_charge_password_hash):
+    if not free_charge.verify_password(
+        request_body.password, evse.free_charge_password_hash
+    ):
         free_charge.record_failure(evse.evse_id)
         raise HTTPException(status_code=401, detail="checkout.free.error.password")
     free_charge.clear_failures(evse.evse_id)
 
     paid_tariff = (
-        db.query(TariffModel).filter(TariffModel.id == evse.connectors[0].tariff_id).first()
+        db.query(TariffModel)
+        .filter(TariffModel.id == evse.connectors[0].tariff_id)
+        .first()
     )
     currency = (paid_tariff.currency if paid_tariff is not None else "usd").lower()
     tariff = _free_tariff(db, currency)
@@ -168,6 +188,7 @@ async def start_free_checkout(
         tariff_id=tariff.id,
         source="free",
         authorization_amount=0,
+        authorized_at=datetime.now(timezone.utc),
     )
     db.add(db_checkout)
     db.commit()
@@ -244,8 +265,9 @@ def _checkout_snapshot(checkout_id: int) -> "Checkout | None":
         return Checkout(
             **{
                 **db_checkout.__dict__,
-                "pricing": generate_pricing(db_checkout.id),
+                "pricing": generate_pricing(db_checkout.id, db=db),
                 "evse_status": db_evse.status if db_evse is not None else None,
+                "inactivity_deadline": inactivity_deadline(db_checkout),
             }
         )
     finally:
@@ -280,12 +302,10 @@ async def checkout_events(id: int):
                 if snapshot is None:
                     break  # checkout vanished mid-stream; nothing left to say
                 yield f"data: {snapshot.model_dump_json()}\n\n"
-                if snapshot.transaction_end_time is not None:
+                if snapshot.captured_at is not None:
                     break
                 try:
-                    await asyncio.wait_for(
-                        queue.get(), timeout=EVENTS_SNAPSHOT_SECONDS
-                    )
+                    await asyncio.wait_for(queue.get(), timeout=EVENTS_SNAPSHOT_SECONDS)
                 except asyncio.TimeoutError:
                     pass  # heartbeat: fall through to a fresh snapshot
         finally:
@@ -305,20 +325,41 @@ async def checkout_events(id: int):
 
 @router.post("/{id}/stop")
 def stop_checkout(id: int, request: Request, db: Session = Depends(get_db)):
-    """Driver-requested remote stop of the checkout's running session.
+    """Cancel and release a pending start, or stop an active charging session.
 
-    Sends RequestStopTransaction (1.6: RemoteStopTransaction) to the station.
-    Settlement is untouched here: the charger's transaction-end event drives
-    the normal capture path, same as unplugging."""
+    Persist the request so recovery continues after a browser disconnect or
+    temporary Stripe/charger failure. Active usage settles from the final meter.
+    """
     db_checkout = db.query(CheckoutModel).filter(CheckoutModel.id == id).first()
     if db_checkout is None:
         raise HTTPException(status_code=404, detail="charging.error.sessionnotfound")
-    if (
-        db_checkout.transaction_start_time is None
-        or db_checkout.transaction_end_time is not None
-        or db_checkout.remote_request_transaction_id is None
-    ):
-        raise HTTPException(status_code=409, detail="charging.error.notrunning")
+    db_checkout = locked_checkout(db, id)
+    if db_checkout.captured_at is not None:
+        return {"status": "Canceled" if db_checkout.canceled_at else "Closed"}
+    reconcile_core_transaction(db, db_checkout)
+    db.commit()
+    db_checkout = locked_checkout(db, id)
+    if db_checkout.transaction_start_time is None:
+        try:
+            checkout = cancel_checkout(db, id, "driver_canceled", prestart_only=True)
+        except Exception:
+            # The durable cancellation marker lets the recovery worker retry.
+            db.rollback()
+            error(" [payments] hold release pending for checkout %s", id, exc_info=True)
+            return {"status": "Canceling"}
+        if checkout.captured_at:
+            return {"status": "Canceled" if checkout.canceled_at else "Closed"}
+        db_checkout = checkout  # A start raced the cancellation: stop that session.
+    if db_checkout.transaction_end_time is not None:
+        return {"status": "Settling"}
+    db_checkout.stop_requested_at = db_checkout.stop_requested_at or datetime.now(
+        timezone.utc
+    )
+    db.commit()
+    if db_checkout.remote_request_transaction_id is None:
+        # A Started event can race the core transaction-ID insert. Keep the
+        # request durable; the worker/late-bind handler will send the stop.
+        return {"status": "Stopping"}
 
     db_connector = (
         db.query(ConnectorModel)

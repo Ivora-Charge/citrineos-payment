@@ -77,5 +77,14 @@
   "checkout.free.cancel": "Abbrechen",
   "checkout.free.error.password": "Falsches Passwort.",
   "checkout.free.error.locked": "Zu viele falsche Passwörter. Versuche es in 15 Minuten erneut.",
-  "checkout.free.error.unavailable": "Kostenloses Laden ist an dieser Ladestation nicht aktiviert."
+  "checkout.free.error.unavailable": "Kostenloses Laden ist an dieser Ladestation nicht aktiviert.",
+  "charging.button.cancel": "Start abbrechen",
+  "charging.cancel.confirm": "Diesen Start abbrechen und die Kartenreservierung freigeben?",
+  "charging.cancel.requested": "Abbruch und Freigabe der Reservierung…",
+  "charging.canceled": "Ladevorgang abgebrochen",
+  "charging.canceled.inactivity": "Nach 5 Minuten ohne Laden abgebrochen",
+  "charging.settling": "Laden beendet. Zahlung wird abgeschlossen…",
+  "charging.inactivity.notice": "Beginnt das Laden nicht innerhalb von 5 Minuten, brechen wir automatisch ab und geben die Reservierung frei. Sie können jetzt abbrechen.",
+  "charging.hold.released": "Die Kartenreservierung wurde storniert. Ihre Bank benötigt möglicherweise Zeit, um den vorgemerkten Betrag zu entfernen.",
+  "charging.hold.releasing": "Ihr Abbruch wurde gespeichert. Wir geben die Kartenreservierung frei. Sie können diese Seite schließen."
 }

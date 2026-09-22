@@ -409,6 +409,28 @@ columns are added by `init_db()` on boot (the idempotent ALTERs above).
 
 ## Tests
 
+Payment recovery runs independently of the legacy reaper. Failed starts release
+their Stripe authorization as soon as the failure is received. The mobile charging
+page exposes **Cancel start** before charging and **Stop charging** during a session.
+After 300 seconds without energy increase or positive charging power, recovery
+stops the session and releases the hold (or captures recorded usage and releases
+the unused amount). Browser polling and zero meter readings do not extend this
+deadline. The worker checks every five seconds and retries Stripe failures and
+unacknowledged charger stops. Bank pending-charge displays can update later.
+
+Development regression tools use a local OCPP simulator and Stripe test mode:
+
+```bash
+node scripts/payment_recovery_simulator.cjs
+.venv/bin/python scripts/payment_recovery_dev.py create no-start
+node scripts/check_payment_recovery_mobile.cjs <checkout-id>
+```
+
+The test helper also supports `reject`, `failed-start`, `charging`, and `zero-energy`.
+Use `inspect <checkout-id>` to compare local state with Stripe. Leave a no-start
+checkout open for five minutes to verify automatic release without a browser.
+The helper refuses live Stripe keys and nonlocal databases.
+
 To execute the tests, run the following command from the root directory:
 ```bash
 python -m unittest

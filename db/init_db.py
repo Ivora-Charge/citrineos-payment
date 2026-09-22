@@ -1,4 +1,5 @@
 from logging import info
+from datetime import datetime, timezone
 from config import Config
 
 from sqlalchemy import (
@@ -35,6 +36,7 @@ Base = declarative_base()
 
 class TenantPlatformFee(Base):
     """Platform-controlled rates, deliberately not exposed through Hasura."""
+
     __tablename__ = f"{Config.DB_TABLE_PREFIX}tenant_platform_fees"
     tenant_id = Column(Integer, primary_key=True)
     basis_points = Column(Integer, nullable=False)
@@ -97,11 +99,15 @@ class Evse(Base):
     # plug-in autostart) keep running instead of being force-stopped by the
     # SCAN_AND_CHARGE_REQUIRE_PREPAYMENT policy; the driver pays via the
     # transaction QR while charging.
-    plug_and_charge = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    plug_and_charge = Column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     # Admin free charging (utils/free_charge.py): the host lets whoever knows
     # a password start a session without paying. Both come from platform-api
     # with the catalog sync; the checkout page verifies against the hash.
-    free_charge_enabled = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    free_charge_enabled = Column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     free_charge_password_hash = Column(String(255))
 
     connectors = relationship("Connector", back_populates="evse")
@@ -168,6 +174,20 @@ class Checkout(Base):
     __tablename__ = f"{Config.DB_TABLE_PREFIX}checkouts"
 
     id = Column(Integer, primary_key=True, autoincrement="auto", index=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    authorized_at = Column(DateTime(timezone=True))
+    last_activity_at = Column(DateTime(timezone=True))
+    stop_requested_at = Column(DateTime(timezone=True))
+    cancellation_requested_at = Column(DateTime(timezone=True))
+    canceled_at = Column(DateTime(timezone=True))
+    cancellation_reason = Column(String(32))
+    # Snapshot the Stripe account: catalog reassignment must not move an existing hold.
+    stripe_account_id = Column(String(255))
+    stripe_checkout_session_id = Column(String(255))
     # NULL means a checkout predating platform fees; preserve its original terms.
     platform_fee_bps = Column(Integer)
     platform_fee_amount = Column(Integer)
@@ -242,7 +262,9 @@ class Checkout(Base):
 class OcppEvse(Base):
     __tablename__ = "Evses"
 
-    databaseId = Column("id", Integer, primary_key=True, autoincrement="auto", index=True)
+    databaseId = Column(
+        "id", Integer, primary_key=True, autoincrement="auto", index=True
+    )
     id = Column("evseTypeId", Integer, nullable=False)
 
     __table_args__ = ()
@@ -297,11 +319,34 @@ def init_db() -> None:
     # payment_evses idempotently.
     evses_table = f"{Config.DB_TABLE_PREFIX}evses"
     with engine.begin() as conn:
-        for column in ("platform_fee_bps", "platform_fee_amount", "overage_platform_fee_amount"):
-            conn.execute(text(
-                f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
-                f'ADD COLUMN IF NOT EXISTS {column} INTEGER'
-            ))
+        for column, definition in {
+            "created_at": "TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP",
+            "authorized_at": "TIMESTAMPTZ",
+            "last_activity_at": "TIMESTAMPTZ",
+            "stop_requested_at": "TIMESTAMPTZ",
+            "cancellation_requested_at": "TIMESTAMPTZ",
+            "canceled_at": "TIMESTAMPTZ",
+            "cancellation_reason": "VARCHAR(32)",
+            "stripe_account_id": "VARCHAR(255)",
+            "stripe_checkout_session_id": "VARCHAR(255)",
+        }.items():
+            conn.execute(
+                text(
+                    f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
+                    f"ADD COLUMN IF NOT EXISTS {column} {definition}"
+                )
+            )
+        for column in (
+            "platform_fee_bps",
+            "platform_fee_amount",
+            "overage_platform_fee_amount",
+        ):
+            conn.execute(
+                text(
+                    f'ALTER TABLE "{Config.DB_TABLE_PREFIX}checkouts" '
+                    f"ADD COLUMN IF NOT EXISTS {column} INTEGER"
+                )
+            )
         conn.execute(
             text(
                 f'ALTER TABLE "{Config.DB_TABLE_PREFIX}locations" '
@@ -445,11 +490,11 @@ def init_db() -> None:
                 f"JOIN {prefix}evses pe ON pe.id = pc.evse_id "
                 f"LEFT JOIN {prefix}tariffs tar ON tar.id = c.tariff_id "
                 'JOIN "ChargingStations" s '
-                "ON s.\"ocppConnectionName\" = pe.station_id "
-                "AND s.\"tenantId\" = pe.tenant_id::int "
+                'ON s."ocppConnectionName" = pe.station_id '
+                'AND s."tenantId" = pe.tenant_id::int '
                 'JOIN "Transactions" t '
-                "ON t.\"stationId\" = s.id "
-                "AND t.\"transactionId\" = c.remote_request_transaction_id "
+                'ON t."stationId" = s.id '
+                'AND t."transactionId" = c.remote_request_transaction_id '
                 "WHERE c.remote_request_transaction_id IS NOT NULL"
             )
         )

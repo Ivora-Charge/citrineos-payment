@@ -1,17 +1,24 @@
 import json
-from uuid import uuid4
+from datetime import datetime, timezone
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from logging import debug, exception, warning
+from logging import debug, warning
 from json import loads
 from sqlalchemy.orm import Session
 
 from config import Config
-from db.init_db import Connector, Evse, Transaction, get_db, Checkout as CheckoutModel
+from db.init_db import Connector, Evse, get_db, Checkout as CheckoutModel
 from integrations.charger_display import get_display_adapter
 from integrations.integration import OcppIntegration
 from schemas.checkouts import RequestStartStopStatusEnumType
 from utils import live
+from utils.payment_lifecycle import (
+    cancel_checkout,
+    checkout_account,
+    release_checkout,
+    locked_checkout,
+)
+from utils.utils import stripe_account_kwargs
 
 router = APIRouter()
 
@@ -108,6 +115,14 @@ async def stripe_webhook(
                 status_code=404, detail="No checkout found for payment intent"
             )
         db_checkout.authorization_amount = checkout_session.get("amount_total")
+        account = checkout_account(db, db_checkout)
+        if event.get("account") and account != event.get("account"):
+            raise HTTPException(
+                status_code=400, detail="Payment account does not match checkout"
+            )
+        db_checkout.authorized_at = db_checkout.authorized_at or datetime.fromtimestamp(
+            event.get("created") or datetime.now(timezone.utc).timestamp(), timezone.utc
+        )
         # Stripe Checkout always collects the payer's email; keep it so
         # settlement can send the itemized receipt. (Persisted by the
         # handlers' commit below.)
@@ -137,7 +152,33 @@ async def handle_web_portal(
     db_checkout: CheckoutModel,
     paymentIntentId: str,
 ):
+    # Commit caller-supplied amount/email/account before refreshing the locked row.
+    db.commit()
+    db_checkout = locked_checkout(db, db_checkout.id)
+    account = checkout_account(db, db_checkout)
+    if (
+        db_checkout.payment_intent_id
+        and db_checkout.payment_intent_id != paymentIntentId
+    ):
+        # A reusable payment link must never replace an earlier hold/session.
+        cancel_payment_intent(paymentIntentId, account)
+        return
+    if db_checkout.captured_at and not db_checkout.cancellation_requested_at:
+        return
+    if db_checkout.cancellation_requested_at:
+        # The driver can cancel before Stripe's completed webhook arrives.
+        # Attach and release the delayed authorization; never remote-start it.
+        db_checkout.payment_intent_id = paymentIntentId
+        db_checkout.captured_at = None
+        db_checkout.canceled_at = None
+        db.commit()
+        release_checkout(db, db_checkout.id)
+        return
+    if db_checkout.remote_request_status is not None:
+        # Stripe redelivery must not issue a second remote start.
+        return
     db_checkout.payment_intent_id = paymentIntentId
+    db_checkout.authorized_at = db_checkout.authorized_at or datetime.now(timezone.utc)
     db.add(db_checkout)
     db.commit()
 
@@ -149,6 +190,7 @@ async def handle_web_portal(
             " [CitrineOS] Connector not found for remote start request: %r",
             db_checkout.id,
         )
+        cancel_checkout(db, db_checkout.id, "start_failed")
         return RequestStartStopStatusEnumType.REJECTED
 
     db_evse = db.query(Evse).filter(Evse.id == db_connector.evse_id).first()
@@ -156,6 +198,7 @@ async def handle_web_portal(
         debug(
             " [CitrineOS] EVSE not found for remote start request: %r", db_checkout.id
         )
+        cancel_checkout(db, db_checkout.id, "start_failed")
         return RequestStartStopStatusEnumType.REJECTED
 
     # TODO: Remove this part when CitrineOS is correctly saving the idToken from RemoteStartRequests.
@@ -173,7 +216,7 @@ async def handle_web_portal(
     )
     if authorization is None:
         debug(" [Stripe] Unable to create authorization for transaction")
-        cancel_payment_intent(paymentIntentId)
+        cancel_checkout(db, db_checkout.id, "start_failed")
         raise HTTPException(
             status_code=404, detail="Unable to create authorization for transaction"
         )
@@ -220,7 +263,7 @@ async def handle_web_portal(
             db_checkout.id,
             paymentIntentId,
         )
-        cancel_payment_intent(paymentIntentId)
+        cancel_checkout(db, db_checkout.id, "start_failed")
 
 
 async def handle_scan_and_charge(
@@ -245,79 +288,14 @@ async def handle_scan_and_charge(
         db_evse = db.query(Evse).filter(Evse.station_id == stationId).first()
     if db_evse is None:
         debug(" [Stripe] No EVSE found for scan & charge checkout")
-        cancel_payment_intent(paymentIntentId)
+        cancel_payment_intent(paymentIntentId, checkout_account(db, db_checkout))
         raise HTTPException(
             status_code=404, detail="No EVSE found for scan & charge checkout"
         )
 
-    ocppTransaction = (
-        db.query(Transaction)
-        .filter(
-            Transaction.stationId == stationId,
-            Transaction.transactionId == transactionId,
-        )
-        .first()
-    )
-    session_active = ocppTransaction is not None and ocppTransaction.isActive
-
-    # Authorize the (current or upcoming) session and tie it to this payment.
-    authorization = await ocpp_integration.create_authorization(
-        str(uuid4()),
-        "Central",
-        [
-            (transactionId, "TransactionId"),
-            (paymentIntentId, "PaymentIntentId"),
-        ],
-        tenant_id=db_evse.tenant_id,
-    )
-    if authorization is None:
-        debug(" [Stripe] Unable to create authorization for transaction")
-        cancel_payment_intent(paymentIntentId)
-        raise HTTPException(
-            status_code=404, detail="Unable to create authorization for transaction"
-        )
-
-    idToken = authorization["idToken"]
-    request_body = {
-        "remoteStartId": db_checkout.id,
-        "idToken": idToken,
-        "evseId": ocppTransaction.evse.id
-        if session_active and ocppTransaction.evse is not None
-        else db_evse.ocpp_evse_id,
-    }
-
-    # Send the remote start either way: if the cable is already plugged in
-    # (post-plug scan & charge) the station starts charging immediately; if it
-    # isn't yet (pay-before-plug) the station arms and starts the moment the
-    # driver plugs in. Both paths echo remoteStartId back on the resulting
-    # TransactionEvent(Started), which links the session to this checkout so the
-    # PayServe charging page leaves the "waiting" state. Previously this handler
-    # required a live transaction and cancelled the payment otherwise, breaking
-    # the pay-before-plug flow entirely.
-    debug(" [Stripe] remote start request: %r", json.dumps(request_body))
-    response = ocpp_integration.send_citrineos_message(
-        station_id=stationId,
-        tenant_id=db_evse.tenant_id,
-        url_path="evdriver/requestStartTransaction",
-        json_payload=request_body,
-    )
-    remote_start_stop = RequestStartStopStatusEnumType.REJECTED
-    if citrineos_call_succeeded(response):
-        remote_start_stop = RequestStartStopStatusEnumType.ACCEPTED
-    db_checkout.remote_request_status = remote_start_stop
-    db_checkout.payment_intent_id = paymentIntentId
-    db.add(db_checkout)
-    db.commit()
-    live.notify(db_checkout.id)
-    if remote_start_stop == RequestStartStopStatusEnumType.REJECTED:
-        # Same as the web-portal path: a rejected start means no session, so
-        # the driver's hold must be released immediately.
-        warning(
-            " [Stripe] remote start rejected for checkout %s; releasing hold %s",
-            db_checkout.id,
-            paymentIntentId,
-        )
-        cancel_payment_intent(paymentIntentId)
+    # Share cancellation, duplicate-webhook and late-payment handling with the
+    # web checkout. PAY_<id> also lets OCPP 1.6 correlate/revoke this start.
+    await handle_web_portal(db, ocpp_integration, db_checkout, paymentIntentId)
 
     # Take the scan-and-charge QR down via the same adapter that showed it (a
     # SetDisplayMessage clear for standard chargers, a DataTransfer for Renova).
@@ -327,8 +305,8 @@ async def handle_scan_and_charge(
     )
 
 
-def cancel_payment_intent(paymentIntendId: str):
-    try:
-        stripe.PaymentIntent.cancel(paymentIntendId)
-    except Exception as e:
-        exception(" [Stripe] Error while canceling payment intent: %r", e.__str__())
+def cancel_payment_intent(paymentIntendId: str, account_id: str):
+    # Do not swallow a failed release or acknowledge success to Stripe.
+    return stripe.PaymentIntent.cancel(
+        paymentIntendId, **stripe_account_kwargs(account_id)
+    )

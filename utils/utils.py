@@ -1,3 +1,4 @@
+from contextlib import closing
 from logging import error
 from sqlalchemy.orm import Session
 
@@ -8,8 +9,15 @@ from schemas.checkouts import Pricing
 
 def generate_pricing(
     checkout_id: int,
+    db: Session = None,
 ) -> Pricing:
-    db: Session = next(get_db())
+    if db is not None:
+        return _pricing_from_session(checkout_id, db)
+    with closing(next(get_db())) as session:
+        return _pricing_from_session(checkout_id, session)
+
+
+def _pricing_from_session(checkout_id: int, db: Session) -> Pricing:
     db_checkout = db.query(Checkout).filter(Checkout.id == checkout_id).first()
     if db_checkout is None:
         error(

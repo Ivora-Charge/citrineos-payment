@@ -21,7 +21,8 @@ from db.init_db import Base, Checkout, Connector, Evse, Location, Operator, Tari
 from utils import free_charge
 
 # platform-api/free_charge.py output for "open-sesame" (same PBKDF2 format).
-import base64, hashlib
+import base64
+import hashlib
 
 def make_hash(password: str, iterations: int = 1000) -> str:
     salt = b"0123456789abcdef"
@@ -196,7 +197,7 @@ class FreeCheckoutTests(unittest.TestCase):
         from integrations.integration import OcppIntegration
         import asyncio
         db = TestSession()
-        evse = seed(db)
+        seed(db)
         r = client.post("/api/checkouts/free", json={"evse_id": "CP1-1", "password": "open-sesame"})
         cid = r.json()["id"]
         ck = db.query(Checkout).filter(Checkout.id == cid).first()

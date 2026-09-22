@@ -31,6 +31,7 @@ Everything here is best-effort: a vendor-protocol hiccup must never break
 boots, catalog syncs, or the AMQP consumer loop.
 """
 
+from contextlib import closing
 import json
 from datetime import datetime, timezone
 from logging import debug, info, warning
@@ -317,7 +318,7 @@ async def sync_plug_and_charge_authorization(ocpp, db, evse) -> None:
                     "VALUES (:id_token, :id_token_type, 'Accepted', true, "
                     ":tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
                     'ON CONFLICT ("tenantId", "idToken", "idTokenType") DO UPDATE '
-                    "SET \"status\" = 'Accepted', \"concurrentTransaction\" = true, "
+                    'SET "status" = \'Accepted\', "concurrentTransaction" = true, '
                     '"updatedAt" = CURRENT_TIMESTAMP'
                 ),
                 {
@@ -406,9 +407,7 @@ async def handle_data_transfer(ocpp, payload: dict, station_id: str) -> None:
         elif message_id.startswith("bill"):
             _handle_bill(ocpp, data, station_id)
         else:
-            debug(
-                " [rcd] unhandled DataTransfer %r from %s", message_id, station_id
-            )
+            debug(" [rcd] unhandled DataTransfer %r from %s", message_id, station_id)
     except Exception as e:
         # A vendor-payload surprise must never bounce the consumer loop.
         warning(
@@ -478,39 +477,39 @@ def _handle_bill(ocpp, data: dict, station_id: str) -> None:
     if serial is None:
         return
 
-    db = next(get_db())
-    probe = TransactionEventRequest(
-        eventType=TransactionEventEnumType.Ended,
-        timestamp=datetime.now(timezone.utc),
-        triggerReason=TriggerReasonEnumType.EVDeparted,
-        transactionInfo=TransactionType(transactionId=serial),
-    )
-    checkout = ocpp.find_checkout_for_event(db, probe, station_id=station_id)
-    if checkout is None:
-        info(
-            " [rcd] bill serial %s on %s matches no checkout (free-vend or"
-            " RFID session?)",
-            serial,
-            station_id,
+    with closing(next(get_db())) as db:
+        probe = TransactionEventRequest(
+            eventType=TransactionEventEnumType.Ended,
+            timestamp=datetime.now(timezone.utc),
+            triggerReason=TriggerReasonEnumType.EVDeparted,
+            transactionInfo=TransactionType(transactionId=serial),
         )
-        return
-
-    charger_kwh = _field(data, "electricEnergy", "electric_energy", cast=float)
-    our_kwh = checkout.transaction_kwh
-    if charger_kwh is not None and our_kwh is not None:
-        drift = abs(charger_kwh - our_kwh)
-        if drift > max(BILL_ENERGY_TOLERANCE_KWH, 0.02 * charger_kwh):
-            warning(
-                " [rcd] bill/meter energy drift on %s (checkout %s): charger"
-                " says %.3f kWh, meter pipeline says %.3f kWh",
+        checkout = ocpp.find_checkout_for_event(db, probe, station_id=station_id)
+        if checkout is None:
+            info(
+                " [rcd] bill serial %s on %s matches no checkout (free-vend or"
+                " RFID session?)",
+                serial,
                 station_id,
-                checkout.id,
-                charger_kwh,
-                our_kwh,
             )
-    debug(
-        " [rcd] bill reconciled for checkout %s: charger amount=%s energy=%s",
-        checkout.id,
-        _field(data, "amount"),
-        charger_kwh,
-    )
+            return
+
+        charger_kwh = _field(data, "electricEnergy", "electric_energy", cast=float)
+        our_kwh = checkout.transaction_kwh
+        if charger_kwh is not None and our_kwh is not None:
+            drift = abs(charger_kwh - our_kwh)
+            if drift > max(BILL_ENERGY_TOLERANCE_KWH, 0.02 * charger_kwh):
+                warning(
+                    " [rcd] bill/meter energy drift on %s (checkout %s): charger"
+                    " says %.3f kWh, meter pipeline says %.3f kWh",
+                    station_id,
+                    checkout.id,
+                    charger_kwh,
+                    our_kwh,
+                )
+        debug(
+            " [rcd] bill reconciled for checkout %s: charger amount=%s energy=%s",
+            checkout.id,
+            _field(data, "amount"),
+            charger_kwh,
+        )

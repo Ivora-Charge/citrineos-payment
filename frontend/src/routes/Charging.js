@@ -35,44 +35,36 @@ export default function Charging() {
   // Shared mapping from a checkout payload (poll response or SSE frame) to
   // page state. Scheduling stays with the callers.
   const handleCheckoutData = React.useCallback((data) => {
-    // Only an explicit rejection is terminal. A blank status means the
-    // payment webhook / RemoteStart hasn't landed yet (it's async and can
-    // arrive a few seconds after Stripe redirects here) — fall through to the
-    // waiting branch and keep watching rather than showing a false rejection.
-    if (data.remote_request_status === 'Rejected') {
-      setState((prevState) => ({ ...prevState, status: 'rejected' }));
-    } else if (data.id && data.transaction_start_time) {
-      setState((prevState) => {
-        const newState = {
-          ...prevState,
-          ...data,
-          status: data.transaction_end_time ? 'closed' : 'charging',
-          timestamp: moment().format('DD-MM-YYYY HH:mm:ss'), // Using now() instead of last_updated from MeterValues
-        };
-        const moment_start = moment.utc(data.transaction_start_time);
-        const moment_end = data.transaction_end_time
-          ? moment.utc(data.transaction_end_time)
-          : moment(moment().utc().toISOString());
-        newState.chargingTime = moment_end.diff(moment_start, 'seconds');
-        return newState;
-      });
-    } else if (data.id && !data.transaction_start_time) {
-      // Paid & authorized, but charging hasn't begun yet — the driver hasn't
-      // plugged in (pay-before-plug) or the charger is still starting up.
-      // Keep waiting; the session begins automatically on plug-in.
-      // The payload carries the live connector state: once the cable is in,
-      // the EVSE reports 'Occupied' (1.6 "Preparing") and the headline
-      // switches from "plug in" to "Preparing to charge".
-      setState((prevState) => ({
-        ...prevState,
-        evseStatus: data.evse_status ?? prevState.evseStatus,
-        status: 'waiting',
-        timestamp: moment().format('DD-MM-YYYY HH:mm:ss'),
-      }));
-    } else {
-      // Do sth when session unknown...
-      // navigate('/');
+    if (!data.id) {
+      return;
     }
+    let status = 'waiting';
+    if (data.canceled_at) {
+      status = 'canceled';
+    } else if (
+      data.cancellation_requested_at ||
+      data.remote_request_status === 'Rejected'
+    ) {
+      status = 'canceling';
+    } else if (data.transaction_end_time) {
+      status = data.captured_at ? 'closed' : 'settling';
+    } else if (data.captured_at) {
+      status = 'closed';
+    } else if (data.transaction_start_time) {
+      status = 'charging';
+    }
+    setState((previous) => ({
+      ...previous,
+      ...data,
+      status,
+      evseStatus: data.evse_status ?? previous.evseStatus,
+      timestamp: moment().format('DD-MM-YYYY HH:mm:ss'),
+      chargingTime: data.transaction_start_time
+        ? moment
+            .utc(data.transaction_end_time || undefined)
+            .diff(moment.utc(data.transaction_start_time), 'seconds')
+        : 0,
+    }));
   }, []);
 
   // Polling fallback (and manual refresh): fetch once; only chain a timer
@@ -85,11 +77,11 @@ export default function Charging() {
         if (eventSourceRef.current) {
           return;
         } // stream drives updates
-        if (data.remote_request_status === 'Rejected') {
+        if (data.captured_at) {
           return;
         }
         if (data.id && data.transaction_start_time) {
-          if (!data.transaction_end_time) {
+          if (!data.captured_at) {
             refreshTimer.current = setTimeout(setSessionData, 30 * 1000); // 30s repeat timer, but only if we don't have an end_datetime yet
           }
         } else if (data.id && !data.transaction_start_time) {
@@ -126,10 +118,7 @@ export default function Charging() {
           return;
         }
         handleCheckoutData(data);
-        if (
-          data.transaction_end_time ||
-          data.remote_request_status === 'Rejected'
-        ) {
+        if (data.captured_at) {
           // Terminal state: the server ends the stream after the final
           // snapshot; close so EventSource doesn't auto-reconnect forever.
           es.close();
@@ -167,8 +156,18 @@ export default function Charging() {
 
   const onStopCharging = async () => {
     const confirmed = await Dialog.confirm({
-      content: intl.formatMessage({ id: 'charging.stop.confirm' }),
-      confirmText: intl.formatMessage({ id: 'charging.stop.confirm.yes' }),
+      content: intl.formatMessage({
+        id:
+          state.status === 'waiting'
+            ? 'charging.cancel.confirm'
+            : 'charging.stop.confirm',
+      }),
+      confirmText: intl.formatMessage({
+        id:
+          state.status === 'waiting'
+            ? 'charging.button.cancel'
+            : 'charging.stop.confirm.yes',
+      }),
       cancelText: intl.formatMessage({ id: 'charging.stop.confirm.no' }),
     });
     if (!confirmed) {
@@ -176,9 +175,24 @@ export default function Charging() {
     }
     setStopping(true);
     try {
-      await axios.post(`checkouts/${sessionId}/stop`);
+      const result = await axios.post(`checkouts/${sessionId}/stop`);
+      if (
+        result.data.status === 'Canceled' ||
+        result.data.status === 'Canceling'
+      ) {
+        setState((previous) => ({
+          ...previous,
+          status: result.data.status === 'Canceled' ? 'canceled' : 'canceling',
+        }));
+      }
+      setSessionData();
       Toast.show({
-        content: intl.formatMessage({ id: 'charging.stop.requested' }),
+        content: intl.formatMessage({
+          id:
+            state.status === 'waiting'
+              ? 'charging.cancel.requested'
+              : 'charging.stop.requested',
+        }),
       });
       // With a live stream the end event is pushed; in polling mode, poll
       // sooner than the 30s cadence so the page flips to 'closed' as soon
@@ -189,7 +203,7 @@ export default function Charging() {
       }
       // `stopping` stays true: the button remains disabled until the status
       // leaves 'charging' and the button unmounts with it.
-    } catch (e) {
+    } catch {
       setStopping(false);
       Toast.show({
         icon: 'fail',
@@ -226,7 +240,7 @@ export default function Charging() {
             <i className="ri-flashlight-fill"></i>
           ) : state.status === 'rejected' ? (
             <i className="ri-error-warning-fill"></i>
-          ) : state.status === 'closed' ? (
+          ) : state.status === 'closed' || state.status === 'canceled' ? (
             <i className="ri-check-double-fill"></i>
           ) : (
             <i className="ri-error-warning-fill"></i>
@@ -235,28 +249,39 @@ export default function Charging() {
 
         <div className="charge-status__headline">
           {/* Caption depending on state */}
-          {state.status === 'waiting'
+          {state.status === 'canceled'
             ? intl.formatMessage({
-                // Cable already in (EVSE 'Occupied' = 1.6 "Preparing"): the
-                // driver has done their part, so don't keep saying "plug in".
                 id:
-                  state.evseStatus === 'Occupied'
-                    ? 'charging.preparing'
-                    : 'charging.authorized.waiting',
+                  state.cancellation_reason === 'inactivity'
+                    ? 'charging.canceled.inactivity'
+                    : 'charging.canceled',
               })
-            : state.status === 'charging'
-              ? !state.power_active_import && !state.transaction_kwh
-                ? // Session started but no energy flowing yet — the charger is
-                  // still negotiating with the car, not actually charging.
-                  intl.formatMessage({ id: 'charging.preparing' })
-                : `${intl.formatMessage({ id: 'charging.speed' })} ${state.power_active_import !== null ? `: ${Number(state.power_active_import).toFixed(2)} kW` : ''} `
-              : state.status === 'rejected'
-                ? intl.formatMessage({ id: 'charging.rejected' })
-                : state.status === 'closed'
-                  ? intl.formatMessage({ id: 'charging.finished' })
-                  : state.statusMessage
-                    ? intl.formatMessage({ id: state.statusMessage })
-                    : intl.formatMessage({ id: 'global.error.generic' })}
+            : state.status === 'canceling'
+              ? intl.formatMessage({ id: 'charging.cancel.requested' })
+              : state.status === 'settling'
+                ? intl.formatMessage({ id: 'charging.settling' })
+                : state.status === 'waiting'
+                  ? intl.formatMessage({
+                      // Cable already in (EVSE 'Occupied' = 1.6 "Preparing"): the
+                      // driver has done their part, so don't keep saying "plug in".
+                      id:
+                        state.evseStatus === 'Occupied'
+                          ? 'charging.preparing'
+                          : 'charging.authorized.waiting',
+                    })
+                  : state.status === 'charging'
+                    ? !state.power_active_import && !state.transaction_kwh
+                      ? // Session started but no energy flowing yet — the charger is
+                        // still negotiating with the car, not actually charging.
+                        intl.formatMessage({ id: 'charging.preparing' })
+                      : `${intl.formatMessage({ id: 'charging.speed' })} ${state.power_active_import !== null ? `: ${Number(state.power_active_import).toFixed(2)} kW` : ''} `
+                    : state.status === 'rejected'
+                      ? intl.formatMessage({ id: 'charging.rejected' })
+                      : state.status === 'closed'
+                        ? intl.formatMessage({ id: 'charging.finished' })
+                        : state.statusMessage
+                          ? intl.formatMessage({ id: state.statusMessage })
+                          : intl.formatMessage({ id: 'global.error.generic' })}
         </div>
         {/* Charging Speed END */}
 
@@ -277,26 +302,58 @@ export default function Charging() {
         }
 
         {
-          /* Stop button only while a session is actually running */
-          state.status === 'charging' && (
+          /* Cancel is also available while the charger is preparing. */
+          (state.status === 'charging' || state.status === 'waiting') && (
             <Button
               color="danger"
+              block
+              loading={stopping}
               disabled={stopping}
               onClick={onStopCharging}
-              style={{ marginTop: '10px' }}
+              style={{ marginTop: '16px', minHeight: '48px' }}
             >
               <i className="ri-stop-circle-line"></i>{' '}
               {intl.formatMessage({
                 id: stopping
                   ? 'charging.stop.requested'
-                  : 'charging.button.stop',
+                  : state.status === 'waiting'
+                    ? 'charging.button.cancel'
+                    : 'charging.button.stop',
               })}
             </Button>
           )
         }
       </div>
 
-      {state.status !== 'rejected' ? (
+      {state.status === 'waiting' && (
+        <p className="text-align-center" role="status">
+          {intl.formatMessage({ id: 'charging.inactivity.notice' })}
+        </p>
+      )}
+      {(state.status === 'canceled' || state.status === 'canceling') && (
+        <div className="text-align-center" role="status">
+          <p>
+            {intl.formatMessage({
+              id:
+                state.status === 'canceled'
+                  ? 'charging.hold.released'
+                  : 'charging.hold.releasing',
+            })}
+          </p>
+          {state.status === 'canceled' && (
+            <Button
+              block
+              color="primary"
+              onClick={() => navigate(`/checkout/${evseId}`)}
+            >
+              {intl.formatMessage({ id: 'charging.button.again' })}
+            </Button>
+          )}
+        </div>
+      )}
+      {state.status !== 'rejected' &&
+      state.status !== 'canceled' &&
+      state.status !== 'canceling' ? (
         <>
           {/* Charging Costs: total_due = session costs + tax + transaction
               fee, the exact amount that will be captured */}
@@ -369,7 +426,7 @@ export default function Charging() {
             </>
           )}
         </>
-      ) : (
+      ) : state.status === 'rejected' ? (
         /* State is 'rejected' */
         <div className="text-align-center">
           {/* Don't worry */}
@@ -396,7 +453,7 @@ export default function Charging() {
             {intl.formatMessage({ id: 'charging.button.again' })}
           </Button>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

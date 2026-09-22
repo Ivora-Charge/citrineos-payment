@@ -70,22 +70,25 @@ class PlatformFeeTests(unittest.TestCase):
         self.db.commit()
         pricing = SimpleNamespace(total_due=total, currency='USD')
         hold = SimpleNamespace(status='succeeded', customer='cus_1', payment_method='pm_1')
+        checkout_id = checkout.id
         def get_db():
-            yield self.db
+            with TestSession() as db:
+                yield db
         with patch('integrations.integration.get_db', get_db), \
              patch('integrations.integration.generate_pricing', return_value=pricing), \
              patch('integrations.integration.send_receipt_email'), \
              patch.object(Config, 'OVERAGE_CHARGE_ENABLED', True), \
              patch('integrations.integration.stripe.PaymentIntent.retrieve', return_value=SimpleNamespace(status='requires_capture')), \
              patch('integrations.integration.stripe.PaymentIntent.capture', return_value=hold) as capture, \
-             patch('integrations.integration.stripe.PaymentIntent.cancel') as cancel, \
+             patch('integrations.integration.stripe.PaymentIntent.cancel', return_value=SimpleNamespace(status='canceled')) as cancel, \
              patch('integrations.integration.stripe.PaymentIntent.create', return_value=SimpleNamespace(status='succeeded', id='pi_over')) as overage:
             loop = asyncio.new_event_loop()
             try:
-                loop.run_until_complete(OcppIntegration().capture_payment_transaction(checkout_id=checkout.id))
-                loop.run_until_complete(OcppIntegration().capture_payment_transaction(checkout_id=checkout.id))
+                loop.run_until_complete(OcppIntegration().capture_payment_transaction(checkout_id=checkout_id))
+                loop.run_until_complete(OcppIntegration().capture_payment_transaction(checkout_id=checkout_id))
             finally:
                 loop.close()
+        self.db.refresh(checkout)
         return checkout, capture, overage, cancel
 
     def test_partial_capture_and_overage_take_fee_only_on_collected_amount(self):

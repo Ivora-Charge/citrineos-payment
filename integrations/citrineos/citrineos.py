@@ -1,3 +1,4 @@
+from contextlib import closing
 from datetime import datetime, timezone
 from enum import Enum
 import json
@@ -37,6 +38,7 @@ from integrations.charger_display import (
 from schemas.status_notification import StatusNotificationRequest
 from utils import live
 from utils.utils import stripe_account_kwargs
+from utils.payment_lifecycle import cancel_checkout, checkout_evse, utc
 from schemas.transaction_event import (
     IdTokenType,
     MeasurandEnumType,
@@ -61,6 +63,8 @@ class CitrineOsEventAction(str, Enum):
     METERVALUES = "MeterValues"
     # Vendor tunnels (RCD realtime_status / bill; see integrations/rcd_vendor)
     DATATRANSFER = "DataTransfer"
+    REMOTESTARTRESPONSE = "RemoteStartTransaction"
+    REQUESTSTARTRESPONSE = "RequestStartTransaction"
 
 
 class CitrineOSevent(BaseModel):
@@ -74,6 +78,7 @@ class CitrineOSeventHeaders(BaseModel):
     # Station's tenant (stringified by the core's AMQP sender); "1" for
     # events published before the header existed.
     tenantId: str = "1"
+    correlationId: str | None = None
     model_config = ConfigDict(populate_by_name=True)
 
 
@@ -107,25 +112,25 @@ class CitrineOSIntegration(OcppIntegration):
         # authorizations are managed in the database (as the operator UI does),
         # so insert the row directly.
         try:
-            db: Session = next(get_db())
-            db.execute(
-                sql_text(
-                    'INSERT INTO "Authorizations" '
-                    '("idToken", "idTokenType", "status", "tenantId", '
-                    '"additionalInfo", "createdAt", "updatedAt") '
-                    "VALUES (:id_token, :id_token_type, 'Accepted', :tenant_id, "
-                    "CAST(:additional_info AS jsonb), now(), now()) "
-                    'ON CONFLICT ("tenantId", "idToken", "idTokenType") DO NOTHING'
-                ),
-                {
-                    "id_token": idToken["idToken"],
-                    "id_token_type": idToken["type"],
-                    "tenant_id": int(tenant_id),
-                    "additional_info": json.dumps(idToken["additionalInfo"]),
-                },
-            )
-            db.commit()
-            return request_body
+            with closing(next(get_db())) as db:
+                db.execute(
+                    sql_text(
+                        'INSERT INTO "Authorizations" '
+                        '("idToken", "idTokenType", "status", "tenantId", '
+                        '"additionalInfo", "createdAt", "updatedAt") '
+                        "VALUES (:id_token, :id_token_type, 'Accepted', :tenant_id, "
+                        "CAST(:additional_info AS jsonb), now(), now()) "
+                        'ON CONFLICT ("tenantId", "idToken", "idTokenType") DO NOTHING'
+                    ),
+                    {
+                        "id_token": idToken["idToken"],
+                        "id_token_type": idToken["type"],
+                        "tenant_id": int(tenant_id),
+                        "additional_info": json.dumps(idToken["additionalInfo"]),
+                    },
+                )
+                db.commit()
+                return request_body
         except Exception as e:
             exception(" [CitrineOS] Error while creating authorization: %r", e)
             return
@@ -137,16 +142,16 @@ class CitrineOSIntegration(OcppIntegration):
         so a charger that negotiated ocpp2.1 must be addressed via /ocpp/2.1.
         Falls back to the configured (2.0.1) URL when the protocol is unknown."""
         try:
-            db: Session = next(get_db())
-            row = db.execute(
-                sql_text(
-                    'SELECT "protocol" FROM "ChargingStations" '
-                    'WHERE "ocppConnectionName" = :sid AND "tenantId" = :tid '
-                    "LIMIT 1"
-                ),
-                {"sid": station_id, "tid": int(tenant_id)},
-            ).first()
-            protocol = row[0] if row else None
+            with closing(next(get_db())) as db:
+                row = db.execute(
+                    sql_text(
+                        'SELECT "protocol" FROM "ChargingStations" '
+                        'WHERE "ocppConnectionName" = :sid AND "tenantId" = :tid '
+                        "LIMIT 1"
+                    ),
+                    {"sid": station_id, "tid": int(tenant_id)},
+                ).first()
+                protocol = row[0] if row else None
         except Exception as e:
             warning(
                 " [CitrineOS] protocol lookup failed for %s: %r",
@@ -188,9 +193,7 @@ class CitrineOSIntegration(OcppIntegration):
             # 1.6-native (no 2.0.1 equivalent); used by the Sinexcel QR adapter.
             return (url_path, json_payload)
         # SetDisplayMessage & friends have no 1.6 equivalent.
-        warning(
-            " [CitrineOS 1.6] no 1.6 equivalent for %s -- call skipped", url_path
-        )
+        warning(" [CitrineOS 1.6] no 1.6 equivalent for %s -- call skipped", url_path)
         return None
 
     def send_citrineos_message(
@@ -203,9 +206,7 @@ class CitrineOSIntegration(OcppIntegration):
                 return None
             url_path, json_payload = translated
         request_url = (
-            f"{base}/{url_path}"
-            f"?identifier={station_id}"
-            f"&tenantId={tenant_id}"
+            f"{base}/{url_path}" f"?identifier={station_id}" f"&tenantId={tenant_id}"
         )
 
         # Bounded + non-raising: this runs on the event loop (consumer AND
@@ -279,6 +280,8 @@ class CitrineOSIntegration(OcppIntegration):
 
             # Bind headers
             arguments_list = [
+                {"action": "RemoteStartTransaction", "state": "2", "x-match": "all"},
+                {"action": "RequestStartTransaction", "state": "2", "x-match": "all"},
                 {
                     "action": "TransactionEvent",
                     "state": "1",
@@ -374,6 +377,16 @@ class CitrineOSIntegration(OcppIntegration):
             decoded_body = event_message.body.decode()
             citrine_os_event = CitrineOSevent(**json.loads(decoded_body))
 
+            if citrine_os_event.action in (
+                CitrineOsEventAction.REMOTESTARTRESPONSE,
+                CitrineOsEventAction.REQUESTSTARTRESPONSE,
+            ):
+                await self.process_remote_start_response(
+                    citrine_os_event.payload,
+                    CitrineOSeventHeaders(**event_message.headers),
+                )
+                return
+
             if citrine_os_event.action == CitrineOsEventAction.TRANSACTIONEVENT:
                 citrine_os_event_headers = CitrineOSeventHeaders(
                     **event_message.headers
@@ -448,9 +461,7 @@ class CitrineOSIntegration(OcppIntegration):
                 await rcd_vendor.handle_data_transfer(
                     self,
                     payload=citrine_os_event.payload,
-                    station_id=CitrineOSeventHeaders(
-                        **event_message.headers
-                    ).stationId,
+                    station_id=CitrineOSeventHeaders(**event_message.headers).stationId,
                 )
         except ValidationError as e:
             if e.title == CitrineOSevent.__name__:
@@ -469,13 +480,62 @@ class CitrineOSIntegration(OcppIntegration):
                 # the event instead of re-raising: an unparseable message must
                 # never bounce the consumer loop and stall ALL stations.
                 warning(
-                    " [CitrineOS] Skipping event with unsupported payload"
-                    " shape: %r",
+                    " [CitrineOS] Skipping event with unsupported payload" " shape: %r",
                     e.errors(),
                 )
         except Exception as e:
             exception(" [CitrineOS] Processing error for incoming event: %r", e.__str__)
             raise e
+
+    # ------------------------------------------------------------------
+    async def process_remote_start_response(self, payload, headers):
+        # The message API's success flag confirms dispatch, not the charger's
+        # later response. A negative OCPP response must release the hold now.
+        if payload.get("status") != "Rejected" or not headers.correlationId:
+            return
+        with closing(next(get_db())) as db:
+            row = db.execute(
+                sql_text(
+                    'SELECT message FROM "OCPPMessages" WHERE "tenantId"=:tenant '
+                    'AND "ocppConnectionName"=:station AND "correlationId"=:correlation '
+                    "AND origin='csms' ORDER BY id DESC LIMIT 1"
+                ),
+                {
+                    "tenant": int(headers.tenantId),
+                    "station": headers.stationId,
+                    "correlation": headers.correlationId,
+                },
+            ).first()
+            if not row:
+                warning(
+                    " [payments] start response correlation not yet visible: %s",
+                    headers.correlationId,
+                )
+                return  # Five-minute recovery remains the fallback.
+            request = row[0][3]
+            checkout_id = request.get("remoteStartId") or self._ocpp16_remote_start_id(
+                request.get("idTag")
+            )
+            if not checkout_id:
+                return
+            checkout = (
+                db.query(CheckoutModel)
+                .filter_by(id=checkout_id)
+                .with_for_update()
+                .first()
+            )
+            evse = checkout_evse(db, checkout) if checkout else None
+            if (
+                not evse
+                or evse.station_id != headers.stationId
+                or evse.tenant_id != headers.tenantId
+            ):
+                return
+            if checkout.captured_at or checkout.transaction_start_time:
+                return  # A late negative response must not cancel a live session.
+            checkout.remote_request_status = "Rejected"
+            db.commit()
+            cancel_checkout(db, checkout_id, "start_failed")
 
     # ------------------------------------------------------------------
     # OCPP 1.6 adapters: normalize StartTransaction / MeterValues /
@@ -519,43 +579,43 @@ class CitrineOSIntegration(OcppIntegration):
         tx 3, one accumulating the other's readings)."""
         for attempt in range(attempts):
             try:
-                db: Session = next(get_db())
-                row = db.execute(
-                    sql_text(
-                        'SELECT t."transactionId" FROM "Transactions" t '
-                        'JOIN "ChargingStations" cs ON t."stationId" = cs."id" '
-                        'WHERE cs."ocppConnectionName" = :sid '
-                        'AND cs."tenantId" = :tid AND t."isActive" IS TRUE '
-                        'ORDER BY t."createdAt" DESC LIMIT 1'
-                    ),
-                    {"sid": station_id, "tid": int(tenant_id)},
-                ).first()
-                if row and row[0] is not None:
-                    tx_id = str(row[0])
-                    already_bound = (
-                        db.query(CheckoutModel)
-                        .join(
-                            ConnectorModel,
-                            CheckoutModel.connector_id == ConnectorModel.id,
+                with closing(next(get_db())) as db:
+                    row = db.execute(
+                        sql_text(
+                            'SELECT t."transactionId" FROM "Transactions" t '
+                            'JOIN "ChargingStations" cs ON t."stationId" = cs."id" '
+                            'WHERE cs."ocppConnectionName" = :sid '
+                            'AND cs."tenantId" = :tid AND t."isActive" IS TRUE '
+                            'ORDER BY t."createdAt" DESC LIMIT 1'
+                        ),
+                        {"sid": station_id, "tid": int(tenant_id)},
+                    ).first()
+                    if row and row[0] is not None:
+                        tx_id = str(row[0])
+                        already_bound = (
+                            db.query(CheckoutModel)
+                            .join(
+                                ConnectorModel,
+                                CheckoutModel.connector_id == ConnectorModel.id,
+                            )
+                            .join(EvseModel, ConnectorModel.evse_id == EvseModel.id)
+                            .filter(
+                                CheckoutModel.remote_request_transaction_id == tx_id,
+                                EvseModel.station_id == station_id,
+                            )
+                            .first()
                         )
-                        .join(EvseModel, ConnectorModel.evse_id == EvseModel.id)
-                        .filter(
-                            CheckoutModel.remote_request_transaction_id == tx_id,
-                            EvseModel.station_id == station_id,
-                        )
-                        .first()
-                    )
-                    if already_bound is not None:
-                        warning(
-                            " [CitrineOS 1.6] active transaction %s on %s is "
-                            "already bound to checkout %s -- not rebinding; "
-                            "the new session's id will late-bind instead",
-                            tx_id,
-                            station_id,
-                            already_bound.id,
-                        )
-                        return None
-                    return tx_id
+                        if already_bound is not None:
+                            warning(
+                                " [CitrineOS 1.6] active transaction %s on %s is "
+                                "already bound to checkout %s -- not rebinding; "
+                                "the new session's id will late-bind instead",
+                                tx_id,
+                                station_id,
+                                already_bound.id,
+                            )
+                            return None
+                        return tx_id
             except Exception as e:
                 warning(
                     " [CitrineOS 1.6] transaction lookup failed for %s: %r",
@@ -633,9 +693,7 @@ class CitrineOSIntegration(OcppIntegration):
         "Faulted": "Faulted",
     }
 
-    def _normalize_ocpp16_status_notification(
-        self, payload: dict
-    ) -> "dict | None":
+    def _normalize_ocpp16_status_notification(self, payload: dict) -> "dict | None":
         """1.6 StatusNotification -> 2.0.1 request shape, or None to skip.
 
         1.6 connectorId N is EVSE N on the single-connector-per-EVSE units we
@@ -717,9 +775,7 @@ class CitrineOSIntegration(OcppIntegration):
             transactionInfo=TransactionType(
                 transactionId=transaction_id, remoteStartId=remote_start_id
             ),
-            idToken=(
-                IdTokenType(idToken=id_tag, type="ISO14443") if id_tag else None
-            ),
+            idToken=(IdTokenType(idToken=id_tag, type="ISO14443") if id_tag else None),
             meterValue=(
                 self._ocpp16_energy_meter_value(payload["meterStart"])
                 if payload.get("meterStart") is not None
@@ -740,54 +796,58 @@ class CitrineOSIntegration(OcppIntegration):
         stations, and another station's binding of the same number must not
         block this one."""
         try:
-            db: Session = next(get_db())
-            if (
-                db.query(CheckoutModel)
-                .join(ConnectorModel, ConnectorModel.id == CheckoutModel.connector_id)
-                .join(EvseModel, EvseModel.id == ConnectorModel.evse_id)
-                .filter(
-                    CheckoutModel.remote_request_transaction_id == transaction_id,
-                    EvseModel.station_id == station_id,
+            with closing(next(get_db())) as db:
+                if (
+                    db.query(CheckoutModel)
+                    .join(
+                        ConnectorModel, ConnectorModel.id == CheckoutModel.connector_id
+                    )
+                    .join(EvseModel, EvseModel.id == ConnectorModel.evse_id)
+                    .filter(
+                        CheckoutModel.remote_request_transaction_id == transaction_id,
+                        EvseModel.station_id == station_id,
+                    )
+                    .first()
+                    is not None
+                ):
+                    return
+                candidates = (
+                    db.query(CheckoutModel)
+                    .join(
+                        ConnectorModel, ConnectorModel.id == CheckoutModel.connector_id
+                    )
+                    .join(EvseModel, EvseModel.id == ConnectorModel.evse_id)
+                    .filter(
+                        EvseModel.station_id == station_id,
+                        CheckoutModel.remote_request_status == "Accepted",
+                        CheckoutModel.remote_request_transaction_id.is_(None),
+                        CheckoutModel.transaction_start_time.isnot(None),
+                        CheckoutModel.transaction_end_time.is_(None),
+                        CheckoutModel.captured_at.is_(None),
+                    )
+                    .order_by(CheckoutModel.id.desc())
+                    .limit(2)
+                    .all()
                 )
-                .first()
-                is not None
-            ):
-                return
-            candidates = (
-                db.query(CheckoutModel)
-                .join(ConnectorModel, ConnectorModel.id == CheckoutModel.connector_id)
-                .join(EvseModel, EvseModel.id == ConnectorModel.evse_id)
-                .filter(
-                    EvseModel.station_id == station_id,
-                    CheckoutModel.remote_request_status == "Accepted",
-                    CheckoutModel.remote_request_transaction_id.is_(None),
-                    CheckoutModel.transaction_start_time.isnot(None),
-                    CheckoutModel.transaction_end_time.is_(None),
-                    CheckoutModel.captured_at.is_(None),
-                )
-                .order_by(CheckoutModel.id.desc())
-                .limit(2)
-                .all()
-            )
-            if not candidates:
-                return
-            if len(candidates) > 1:
-                warning(
-                    " [CitrineOS 1.6] multiple open checkouts on %s while "
-                    "late-binding transaction %s; binding the newest",
-                    station_id,
+                if not candidates:
+                    return
+                if len(candidates) > 1:
+                    warning(
+                        " [CitrineOS 1.6] multiple open checkouts on %s while "
+                        "late-binding transaction %s; binding the newest",
+                        station_id,
+                        transaction_id,
+                    )
+                db_checkout = candidates[0]
+                db_checkout.remote_request_transaction_id = transaction_id
+                db.add(db_checkout)
+                db.commit()
+                info(
+                    " [CitrineOS 1.6] late-bound transaction %s to checkout %s on %s",
                     transaction_id,
+                    db_checkout.id,
+                    station_id,
                 )
-            db_checkout = candidates[0]
-            db_checkout.remote_request_transaction_id = transaction_id
-            db.add(db_checkout)
-            db.commit()
-            info(
-                " [CitrineOS 1.6] late-bound transaction %s to checkout %s on %s",
-                transaction_id,
-                db_checkout.id,
-                station_id,
-            )
         except Exception as e:
             warning(
                 " [CitrineOS 1.6] late-bind failed for transaction %s on %s: %r",
@@ -807,9 +867,7 @@ class CitrineOSIntegration(OcppIntegration):
         # late-bind to an open checkout mis-bills it by the register value.
         if transaction_id is None or str(transaction_id) == "0":
             return  # clock-aligned / non-transaction samples: nothing to bill
-        self._late_bind_ocpp16(
-            str(transaction_id), citrine_os_event_headers.stationId
-        )
+        self._late_bind_ocpp16(str(transaction_id), citrine_os_event_headers.stationId)
         synthetic = TransactionEventRequest(
             eventType=TransactionEventEnumType.Updated,
             timestamp=(payload.get("meterValue") or [{}])[-1].get("timestamp")
@@ -891,126 +949,131 @@ class CitrineOSIntegration(OcppIntegration):
         transactionId = transaction_event.transactionInfo.transactionId
         stationId = citrine_os_event_headers.stationId
 
-        db: Session = next(get_db())
-        # If pricing is found to vary by evse, we need to change triggerReasonNoAuthArray to mandate events that know the evse
-        # Then add a filter below, EvseModel.ocpp_evse_id == transaction_event.evse.id
-        evse = db.query(EvseModel).filter(EvseModel.station_id == stationId).first()
-        if evse is None:
-            raise Exception("EVSE not found")
+        with closing(next(get_db())) as db:
+            # If pricing is found to vary by evse, we need to change triggerReasonNoAuthArray to mandate events that know the evse
+            # Then add a filter below, EvseModel.ocpp_evse_id == transaction_event.evse.id
+            evse = db.query(EvseModel).filter(EvseModel.station_id == stationId).first()
+            if evse is None:
+                raise Exception("EVSE not found")
 
-        # Prepayment policy: charging must never run before payment. Chargers
-        # are provisioned with TxStartPoint=Authorized so this handler should
-        # not fire at all; if a mis-provisioned charger starts an unauthorized
-        # session anyway, stop it right away. The driver pays via the standing
-        # QR, and the paid RequestStartTransaction starts the real session.
-        # Per-EVSE override: with plug_and_charge enabled the operator wants
-        # exactly these sessions -- charging starts on plug-in and the driver
-        # pays via the transaction QR below while it runs.
-        if evse.plug_and_charge:
-            info(
-                f" [CitrineOS] Unauthorized session {transactionId} on "
-                f"{stationId}: plug-and-charge enabled for {evse.evse_id} "
-                "-- letting it run."
+            # Prepayment policy: charging must never run before payment. Chargers
+            # are provisioned with TxStartPoint=Authorized so this handler should
+            # not fire at all; if a mis-provisioned charger starts an unauthorized
+            # session anyway, stop it right away. The driver pays via the standing
+            # QR, and the paid RequestStartTransaction starts the real session.
+            # Per-EVSE override: with plug_and_charge enabled the operator wants
+            # exactly these sessions -- charging starts on plug-in and the driver
+            # pays via the transaction QR below while it runs.
+            if evse.plug_and_charge:
+                info(
+                    f" [CitrineOS] Unauthorized session {transactionId} on "
+                    f"{stationId}: plug-and-charge enabled for {evse.evse_id} "
+                    "-- letting it run."
+                )
+            elif Config.SCAN_AND_CHARGE_REQUIRE_PREPAYMENT:
+                warning(
+                    f" [CitrineOS] Unauthorized session {transactionId} on "
+                    f"{stationId}: prepayment required -- stopping it. Check the "
+                    "charger's TxStartPoint provisioning."
+                )
+                self.send_citrineos_message(
+                    station_id=stationId,
+                    tenant_id=evse.tenant_id,
+                    url_path="evdriver/requestStopTransaction",
+                    json_payload={"transactionId": transactionId},
+                )
+                return
+
+            tariff = (
+                db.query(TariffModel)
+                .filter(TariffModel.id == evse.connectors[0].tariff_id)
+                .first()
             )
-        elif Config.SCAN_AND_CHARGE_REQUIRE_PREPAYMENT:
-            warning(
-                f" [CitrineOS] Unauthorized session {transactionId} on "
-                f"{stationId}: prepayment required -- stopping it. Check the "
-                "charger's TxStartPoint provisioning."
+            if tariff is None:
+                raise Exception("No Tariff for EVSE found")
+
+            location = (
+                db.query(LocationModel)
+                .filter(LocationModel.id == evse.location_id)
+                .first()
             )
-            self.send_citrineos_message(
-                station_id=stationId,
-                tenant_id=evse.tenant_id,
-                url_path="evdriver/requestStopTransaction",
-                json_payload={"transactionId": transactionId},
+            if location is None:
+                raise Exception("No Location for EVSE found")
+
+            db_checkout = CheckoutModel(
+                connector_id=evse.connectors[0].id,
+                tariff_id=tariff.id,
+                platform_fee_bps=checkout_rate(
+                    db, evse, location.operator.stripe_account_id
+                ),
             )
-            return
-
-        tariff = (
-            db.query(TariffModel)
-            .filter(TariffModel.id == evse.connectors[0].tariff_id)
-            .first()
-        )
-        if tariff is None:
-            raise Exception("No Tariff for EVSE found")
-
-        location = (
-            db.query(LocationModel).filter(LocationModel.id == evse.location_id).first()
-        )
-        if location is None:
-            raise Exception("No Location for EVSE found")
-
-        db_checkout = CheckoutModel(
-            connector_id=evse.connectors[0].id, tariff_id=tariff.id,
-            platform_fee_bps=checkout_rate(db, evse, location.operator.stripe_account_id)
-        )
-        db_checkout = self.update_checkout_with_meter_values(
-            transaction_event=transaction_event, db_checkout=db_checkout
-        )
-        db.add(db_checkout)
-        db.commit()
-        db.refresh(db_checkout)
-
-        stripe_account_id = location.operator.stripe_account_id
-        self._ensure_stripe_price(db, tariff, stripe_account_id)
-
-        try:
-            payment_link_url = await self.create_payment_link(
-                stripe_price_id=tariff.stripe_price_id,
-                stripe_account_id=stripe_account_id,
-                stationId=stationId,
-                evseId=evse.evse_id,
-                transactionId=transactionId,
-                checkoutId=db_checkout.id,
+            db_checkout = self.update_checkout_with_meter_values(
+                transaction_event=transaction_event, db_checkout=db_checkout
             )
-        except stripe.error.InvalidRequestError as e:
-            # Stripe Prices are account-scoped: a cached stripe_price_id goes
-            # stale when the operator's account changes (dev 'platform' -> a
-            # real Connect account, or a charger claimed into another tenant).
-            # Heal by recreating the Price on the current account and retrying
-            # once instead of dropping the whole checkout/QR.
-            if "No such price" not in str(e):
-                raise
-            warning(
-                f" [CitrineOS] Tariff {tariff.id}: price "
-                f"{tariff.stripe_price_id} not found on account "
-                f"{stripe_account_id!r}; recreating."
-            )
-            tariff.stripe_price_id = None
-            db.add(tariff)
+            db.add(db_checkout)
             db.commit()
-            self._ensure_stripe_price(db, tariff, stripe_account_id)
-            payment_link_url = await self.create_payment_link(
-                stripe_price_id=tariff.stripe_price_id,
-                stripe_account_id=stripe_account_id,
-                stationId=stationId,
-                evseId=evse.evse_id,
-                transactionId=transactionId,
-                checkoutId=db_checkout.id,
-            )
+            db.refresh(db_checkout)
 
-        # Point the QR at the PayServe charger-info page (carrying the Stripe
-        # payment link in the `pay` query param) so the driver sees charger/tariff
-        # details and taps "Pay now" before being sent to the Stripe checkout. How
-        # the QR is delivered depends on the charger family (image
-        # SetDisplayMessage vs a Renova DataTransfer) -- routed via the adapter.
-        checkout_page_url = (
-            f"{Config.CLIENT_URL}/checkout/{evse.evse_id}"
-            f"?pay={quote(payment_link_url, safe='')}"
-        )
-        self._resolve_display_adapter_type(db, evse)
-        adapter = get_display_adapter(evse)
-        db_checkout.qr_code_message_id = await adapter.show_transaction_qr(
-            self,
-            db,
-            evse,
-            payment_url=checkout_page_url,
-            transaction_id=transactionId,
-            price=tariff.price_kwh,
-            currency=tariff.currency,
-        )
-        db.add(db_checkout)
-        db.commit()
+            stripe_account_id = location.operator.stripe_account_id
+            self._ensure_stripe_price(db, tariff, stripe_account_id)
+
+            try:
+                payment_link_url = await self.create_payment_link(
+                    stripe_price_id=tariff.stripe_price_id,
+                    stripe_account_id=stripe_account_id,
+                    stationId=stationId,
+                    evseId=evse.evse_id,
+                    transactionId=transactionId,
+                    checkoutId=db_checkout.id,
+                )
+            except stripe.error.InvalidRequestError as e:
+                # Stripe Prices are account-scoped: a cached stripe_price_id goes
+                # stale when the operator's account changes (dev 'platform' -> a
+                # real Connect account, or a charger claimed into another tenant).
+                # Heal by recreating the Price on the current account and retrying
+                # once instead of dropping the whole checkout/QR.
+                if "No such price" not in str(e):
+                    raise
+                warning(
+                    f" [CitrineOS] Tariff {tariff.id}: price "
+                    f"{tariff.stripe_price_id} not found on account "
+                    f"{stripe_account_id!r}; recreating."
+                )
+                tariff.stripe_price_id = None
+                db.add(tariff)
+                db.commit()
+                self._ensure_stripe_price(db, tariff, stripe_account_id)
+                payment_link_url = await self.create_payment_link(
+                    stripe_price_id=tariff.stripe_price_id,
+                    stripe_account_id=stripe_account_id,
+                    stationId=stationId,
+                    evseId=evse.evse_id,
+                    transactionId=transactionId,
+                    checkoutId=db_checkout.id,
+                )
+
+            # Point the QR at the PayServe charger-info page (carrying the Stripe
+            # payment link in the `pay` query param) so the driver sees charger/tariff
+            # details and taps "Pay now" before being sent to the Stripe checkout. How
+            # the QR is delivered depends on the charger family (image
+            # SetDisplayMessage vs a Renova DataTransfer) -- routed via the adapter.
+            checkout_page_url = (
+                f"{Config.CLIENT_URL}/checkout/{evse.evse_id}"
+                f"?pay={quote(payment_link_url, safe='')}"
+            )
+            self._resolve_display_adapter_type(db, evse)
+            adapter = get_display_adapter(evse)
+            db_checkout.qr_code_message_id = await adapter.show_transaction_qr(
+                self,
+                db,
+                evse,
+                payment_url=checkout_page_url,
+                transaction_id=transactionId,
+                price=tariff.price_kwh,
+                currency=tariff.currency,
+            )
+            db.add(db_checkout)
+            db.commit()
 
     def _ensure_stripe_price(self, db: Session, tariff, stripe_account_id) -> None:
         """Create the tariff's hold Price on the *operator's* Stripe account if
@@ -1080,64 +1143,93 @@ class CitrineOSIntegration(OcppIntegration):
     async def process_transaction_started_remote(
         self, transaction_event: TransactionEventRequest
     ) -> None:
-        db: Session = next(get_db())
-        db_checkout = (
-            db.query(CheckoutModel)
-            .filter(CheckoutModel.id == transaction_event.transactionInfo.remoteStartId)
-            .first()
-        )
-        if db_checkout is None:
-            info(
-                " [CitrineOS] Checkout not found for transaction start event: %r",
-                transaction_event,
-            )
-            return
-
-        # Settled checkouts are immutable: a Started event for one is either a
-        # stale broker redelivery (2026-07-08: three replays hours after
-        # capture rewrote the checkout's times/kWh) or a charger re-using the
-        # last PAY_<id> idTag for a NEW session -- which must never be billed
-        # against the old, already-captured payment.
-        if db_checkout.captured_at is not None:
-            warning(
-                " [CitrineOS] Checkout %s already captured; ignoring Started "
-                "event (stale redelivery or re-used idTag): %r",
-                db_checkout.id,
-                transaction_event.transactionInfo,
-            )
-            return
-
-        db_checkout.transaction_start_time = transaction_event.timestamp
-        db_checkout.remote_request_transaction_id = (
-            transaction_event.transactionInfo.transactionId
-        )
-        db_checkout = self.update_checkout_with_meter_values(
-            transaction_event=transaction_event, db_checkout=db_checkout
-        )
-        db.add(db_checkout)
-        db.commit()
-        db.refresh(db_checkout)
-        live.notify(db_checkout.id)
-
-        # The paid session is running: take the standing "scan to pay" QR down
-        # so nobody scans/pays for a connector that is already charging. It is
-        # re-pushed when the connector returns to Available/Occupied.
-        try:
-            db_connector = (
-                db.query(ConnectorModel)
-                .filter(ConnectorModel.id == db_checkout.connector_id)
+        with closing(next(get_db())) as db:
+            db_checkout = (
+                db.query(CheckoutModel)
+                .filter(
+                    CheckoutModel.id == transaction_event.transactionInfo.remoteStartId
+                )
+                .with_for_update()
                 .first()
             )
-            db_evse = (
-                db.query(EvseModel).filter(EvseModel.id == db_connector.evse_id).first()
-                if db_connector
-                else None
+            if db_checkout is None:
+                info(
+                    " [CitrineOS] Checkout not found for transaction start event: %r",
+                    transaction_event,
+                )
+                return
+
+            # Settled checkouts are immutable: a Started event for one is either a
+            # stale broker redelivery (2026-07-08: three replays hours after
+            # capture rewrote the checkout's times/kWh) or a charger re-using the
+            # last PAY_<id> idTag for a NEW session -- which must never be billed
+            # against the old, already-captured payment.
+            if (
+                db_checkout.cancellation_requested_at is not None
+                or db_checkout.canceled_at is not None
+            ):
+                # A cached PAY idTag may still start a charger after cancel.
+                # Preserve the canceled payment and explicitly stop this start.
+                txid = transaction_event.transactionInfo.transactionId
+                evse = checkout_evse(db, db_checkout)
+                db_checkout.stop_requested_at = datetime.now(timezone.utc)
+                db_checkout.remote_request_transaction_id = (
+                    txid or db_checkout.remote_request_transaction_id
+                )
+                db.commit()
+                if txid and evse:
+                    self.send_citrineos_message(
+                        station_id=evse.station_id,
+                        tenant_id=evse.tenant_id,
+                        url_path="evdriver/requestStopTransaction",
+                        json_payload={"transactionId": txid},
+                    )
+                return
+            if db_checkout.captured_at is not None:
+                warning(
+                    " [CitrineOS] Checkout %s already captured; ignoring Started "
+                    "event (stale redelivery or re-used idTag): %r",
+                    db_checkout.id,
+                    transaction_event.transactionInfo,
+                )
+                return
+
+            db_checkout.transaction_start_time = transaction_event.timestamp
+            db_checkout.authorized_at = db_checkout.authorized_at or datetime.now(
+                timezone.utc
             )
-            if db_evse is not None and db_evse.display_message_id is not None:
-                await self.clear_standing_qr(db, db_evse)
-        except Exception as e:
-            exception(" [CitrineOS] Standing-QR clear failed: %r", e.__str__())
-        return
+            db_checkout.remote_request_transaction_id = (
+                transaction_event.transactionInfo.transactionId
+            )
+            db_checkout = self.update_checkout_with_meter_values(
+                transaction_event=transaction_event, db_checkout=db_checkout
+            )
+            db.add(db_checkout)
+            db.commit()
+            db.refresh(db_checkout)
+            live.notify(db_checkout.id)
+
+            # The paid session is running: take the standing "scan to pay" QR down
+            # so nobody scans/pays for a connector that is already charging. It is
+            # re-pushed when the connector returns to Available/Occupied.
+            try:
+                db_connector = (
+                    db.query(ConnectorModel)
+                    .filter(ConnectorModel.id == db_checkout.connector_id)
+                    .first()
+                )
+                db_evse = (
+                    db.query(EvseModel)
+                    .filter(EvseModel.id == db_connector.evse_id)
+                    .first()
+                    if db_connector
+                    else None
+                )
+                if db_evse is not None and db_evse.display_message_id is not None:
+                    await self.clear_standing_qr(db, db_evse)
+            except Exception as e:
+                exception(" [CitrineOS] Standing-QR clear failed: %r", e.__str__())
+            return
 
     def find_checkout_for_event(
         self,
@@ -1165,6 +1257,7 @@ class CitrineOSIntegration(OcppIntegration):
             db_checkout = (
                 db.query(CheckoutModel)
                 .filter(CheckoutModel.id == tx_info.remoteStartId)
+                .with_for_update()
                 .first()
             )
         if db_checkout is None and tx_info.transactionId is not None:
@@ -1180,7 +1273,7 @@ class CitrineOSIntegration(OcppIntegration):
                     .join(EvseModel, ConnectorModel.evse_id == EvseModel.id)
                     .filter(EvseModel.station_id == station_id)
                 )
-            db_checkout = query.first()
+            db_checkout = query.with_for_update().first()
         return db_checkout
 
     async def process_transaction_updated(
@@ -1188,70 +1281,74 @@ class CitrineOSIntegration(OcppIntegration):
         transaction_event: TransactionEventRequest,
         station_id: "str | None" = None,
     ) -> None:
-        db: Session = next(get_db())
-        db_checkout = self.find_checkout_for_event(
-            db, transaction_event, station_id=station_id
-        )
-        if db_checkout is None:
-            info(
-                " [CitrineOS] Checkout not found for transaction update event: %r",
-                transaction_event,
+        with closing(next(get_db())) as db:
+            db_checkout = self.find_checkout_for_event(
+                db, transaction_event, station_id=station_id
             )
-            return
-        if db_checkout.captured_at is not None:
-            info(
-                " [CitrineOS] Checkout %s already captured; ignoring update event",
-                db_checkout.id,
-            )
-            return
+            if db_checkout is None:
+                info(
+                    " [CitrineOS] Checkout not found for transaction update event: %r",
+                    transaction_event,
+                )
+                return
+            if db_checkout.captured_at is not None:
+                info(
+                    " [CitrineOS] Checkout %s already captured; ignoring update event",
+                    db_checkout.id,
+                )
+                return
 
-        db_checkout = self.update_checkout_with_meter_values(
-            transaction_event=transaction_event, db_checkout=db_checkout
-        )
-        db.add(db_checkout)
-        db.commit()
-        db.refresh(db_checkout)
-        live.notify(db_checkout.id)
-        return
+            db_checkout = self.update_checkout_with_meter_values(
+                transaction_event=transaction_event, db_checkout=db_checkout
+            )
+            db.add(db_checkout)
+            db.commit()
+            db.refresh(db_checkout)
+            live.notify(db_checkout.id)
+            return
 
     async def process_transaction_ended(
         self,
         transaction_event: TransactionEventRequest,
         station_id: "str | None" = None,
     ) -> None:
-        db: Session = next(get_db())
-        db_checkout = self.find_checkout_for_event(
-            db, transaction_event, station_id=station_id
-        )
-        if db_checkout is None:
-            info(
-                " [CitrineOS] Checkout not found for transaction end event: %r",
-                transaction_event,
+        with closing(next(get_db())) as db:
+            db_checkout = self.find_checkout_for_event(
+                db, transaction_event, station_id=station_id
             )
-            return
-        if db_checkout.captured_at is not None:
-            info(
-                " [CitrineOS] Checkout %s already captured; ignoring end event",
-                db_checkout.id,
+            if db_checkout is None:
+                info(
+                    " [CitrineOS] Checkout not found for transaction end event: %r",
+                    transaction_event,
+                )
+                return
+            db_checkout.stop_requested_at = None
+            if db_checkout.captured_at is not None:
+                db.commit()
+                info(
+                    " [CitrineOS] Checkout %s already captured; ignoring end event",
+                    db_checkout.id,
+                )
+                return
+
+            db_checkout = self.update_checkout_with_meter_values(
+                transaction_event=transaction_event, db_checkout=db_checkout
             )
+            db_checkout.transaction_end_time = transaction_event.timestamp
+            db.add(db_checkout)
+            db.commit()
+            db.refresh(db_checkout)
+            live.notify(db_checkout.id)
+
+            await self.capture_payment_transaction(app=None, checkout_id=db_checkout.id)
+
             return
-
-        db_checkout = self.update_checkout_with_meter_values(
-            transaction_event=transaction_event, db_checkout=db_checkout
-        )
-        db_checkout.transaction_end_time = transaction_event.timestamp
-        db.add(db_checkout)
-        db.commit()
-        db.refresh(db_checkout)
-        live.notify(db_checkout.id)
-
-        await self.capture_payment_transaction(app=None, checkout_id=db_checkout.id)
-
-        return
 
     def update_checkout_with_meter_values(
         self, transaction_event: TransactionEventRequest, db_checkout: CheckoutModel
     ) -> CheckoutModel:
+        previous_kwh = db_checkout.transaction_kwh or 0
+        positive_power = False
         if (
             transaction_event.meterValue is not None
             and len(transaction_event.meterValue) > 0
@@ -1295,6 +1392,7 @@ class CitrineOSIntegration(OcppIntegration):
                     if multiplier is not None:
                         new_power_value = new_power_value * 10**multiplier
                     db_checkout.power_active_import = new_power_value
+                    positive_power = new_power_value > 0.01
 
                 elif (
                     sampled_value.measurand == MeasurandEnumType.SoC
@@ -1304,6 +1402,12 @@ class CitrineOSIntegration(OcppIntegration):
                     if multiplier is not None:
                         new_soc_value = new_soc_value * 10**multiplier
                     db_checkout.transaction_soc = new_soc_value
+        if (db_checkout.transaction_kwh or 0) > previous_kwh or positive_power:
+            # An old/replayed packet must not move the inactivity clock forward.
+            observed = utc(transaction_event.timestamp)
+            current = utc(db_checkout.last_activity_at)
+            if current is None or observed > current:
+                db_checkout.last_activity_at = min(observed, datetime.now(timezone.utc))
         return db_checkout
 
     def _next_display_message_id(self, db: Session, station_id: str) -> int:
@@ -1459,108 +1563,143 @@ class CitrineOSIntegration(OcppIntegration):
         debounce marker (display_message_id) survives in the DB -- so forget
         the marker and re-push the standing QR for every payable connector of
         the station. Best-effort: display problems must not affect boots."""
-        db: Session = next(get_db())
-        evses = (
-            db.query(EvseModel)
-            .filter(EvseModel.station_id == citrine_os_event_headers.stationId)
-            .all()
-        )
-        for db_evse in evses:
-            try:
-                db_evse.display_message_id = None
-                db.add(db_evse)
-                db.commit()
-                if db_evse.status in ("Available", "Occupied"):
-                    await self.push_standing_qr(db, db_evse)
-                    info(
-                        f" [CitrineOS] Boot: standing QR re-pushed to "
-                        f"{db_evse.evse_id}"
+        with closing(next(get_db())) as db:
+            evses = (
+                db.query(EvseModel)
+                .filter(EvseModel.station_id == citrine_os_event_headers.stationId)
+                .all()
+            )
+            for db_evse in evses:
+                try:
+                    db_evse.display_message_id = None
+                    db.add(db_evse)
+                    db.commit()
+                    if db_evse.status in ("Available", "Occupied"):
+                        await self.push_standing_qr(db, db_evse)
+                        info(
+                            f" [CitrineOS] Boot: standing QR re-pushed to "
+                            f"{db_evse.evse_id}"
+                        )
+                    # A rebooted RCD charger may also have stale local pricing
+                    # (or none, after a factory reset) -- re-sync the tariff.
+                    # push_standing_qr just refreshed display_adapter_type, so
+                    # the vendor gate inside is current.
+                    await rcd_vendor.push_rates(self, db, db_evse)
+                    # Keep the FFFFFFFF plug-and-charge whitelist in step with
+                    # the per-EVSE opt-in (same freshness argument as above).
+                    await rcd_vendor.sync_plug_and_charge_authorization(
+                        self, db, db_evse
                     )
-                # A rebooted RCD charger may also have stale local pricing
-                # (or none, after a factory reset) -- re-sync the tariff.
-                # push_standing_qr just refreshed display_adapter_type, so
-                # the vendor gate inside is current.
-                await rcd_vendor.push_rates(self, db, db_evse)
-                # Keep the FFFFFFFF plug-and-charge whitelist in step with
-                # the per-EVSE opt-in (same freshness argument as above).
-                await rcd_vendor.sync_plug_and_charge_authorization(
-                    self, db, db_evse
-                )
-            except Exception as e:
-                exception(
-                    " [CitrineOS] Boot-time standing-QR push failed: %r",
-                    e.__str__(),
-                )
-        # Station-global display timezone: once per boot, not per EVSE (the
-        # firmware refuses the change mid-session, and boot means idle).
-        if evses:
-            await rcd_vendor.push_zone_offset(self, db, evses[0])
-        return
+                except Exception as e:
+                    exception(
+                        " [CitrineOS] Boot-time standing-QR push failed: %r",
+                        e.__str__(),
+                    )
+            # Station-global display timezone: once per boot, not per EVSE (the
+            # firmware refuses the change mid-session, and boot means idle).
+            if evses:
+                await rcd_vendor.push_zone_offset(self, db, evses[0])
+            return
 
     async def process_status_notification(
         self,
         status_notification: StatusNotificationRequest,
         citrine_os_event_headers: CitrineOSeventHeaders,
     ) -> None:
-        db: Session = next(get_db())
-        db_evse = (
-            db.query(EvseModel)
-            .filter(EvseModel.station_id == citrine_os_event_headers.stationId)
-            .filter(EvseModel.ocpp_evse_id == status_notification.evseId)
-            .first()
-        )
-        if db_evse is None:
-            info(
-                " [CitrineOS] EVSE not found for status notification event: %r",
-                status_notification,
+        with closing(next(get_db())) as db:
+            db_evse = (
+                db.query(EvseModel)
+                .filter(EvseModel.station_id == citrine_os_event_headers.stationId)
+                .filter(EvseModel.ocpp_evse_id == status_notification.evseId)
+                .filter(EvseModel.tenant_id == citrine_os_event_headers.tenantId)
+                .first()
             )
-            return
-
-        previous_status = db_evse.status
-        db_evse.status = status_notification.connectorStatus
-        db.add(db_evse)
-        db.commit()
-        db.refresh(db_evse)
-
-        # Wake any event stream watching an open checkout on this EVSE: the
-        # pre-start page flips "plug in" -> "Preparing" off this status.
-        # Notifying an id nobody watches is a no-op, so no need to be precise.
-        try:
-            open_checkout_ids = (
-                db.query(CheckoutModel.id)
-                .join(
-                    ConnectorModel,
-                    CheckoutModel.connector_id == ConnectorModel.id,
+            if db_evse is None:
+                info(
+                    " [CitrineOS] EVSE not found for status notification event: %r",
+                    status_notification,
                 )
-                .filter(ConnectorModel.evse_id == db_evse.id)
-                .filter(CheckoutModel.transaction_end_time.is_(None))
-                .filter(CheckoutModel.captured_at.is_(None))
-                .all()
-            )
-            for (checkout_id,) in open_checkout_ids:
-                live.notify(checkout_id)
-        except Exception as e:
-            debug(" [CitrineOS] live notify on status failed: %r", e.__str__())
+                return
 
-        # Standing "scan to pay" QR: with prepayment enforced the driver plugs
-        # in FIRST and then pays, so the QR must stay up while the connector is
-        # Occupied-but-unpaid, not just while Available. It is cleared when the
-        # paid (or RFID) session actually starts -- see
-        # process_transaction_started_remote -- and for Faulted/Unavailable/
-        # Reserved states here. Only act on a transition (or a first-time
-        # display) so we don't re-push on every repeated StatusNotification.
-        # Best-effort -- a display failure must not break status tracking.
-        qr_states = ("Available", "Occupied")
-        try:
-            if db_evse.status in qr_states and (
-                previous_status not in qr_states or db_evse.display_message_id is None
+            previous_status = db_evse.status
+            db_evse.status = status_notification.connectorStatus
+            db.add(db_evse)
+            db.commit()
+            db.refresh(db_evse)
+
+            # An armed connector returning to Available (or faulting) before
+            # StartTransaction is a failed attempt, not five more minutes of
+            # waiting. Ignore old status packets and reconcile core first.
+            if db_evse.status == "Faulted" or (
+                previous_status == "Occupied" and db_evse.status == "Available"
             ):
-                await self.push_standing_qr(db, db_evse)
-            elif (
-                db_evse.status not in qr_states
-                and db_evse.display_message_id is not None
-            ):
-                await self.clear_standing_qr(db, db_evse)
-        except Exception as e:
-            exception(" [CitrineOS] Standing-QR update failed: %r", e.__str__())
-        return
+                pending_ids = [
+                    row[0]
+                    for row in db.query(CheckoutModel.id)
+                    .join(
+                        ConnectorModel, ConnectorModel.id == CheckoutModel.connector_id
+                    )
+                    .filter(
+                        ConnectorModel.evse_id == db_evse.id,
+                        CheckoutModel.transaction_start_time.is_(None),
+                        CheckoutModel.captured_at.is_(None),
+                        CheckoutModel.authorized_at <= status_notification.timestamp,
+                    )
+                    .all()
+                ]
+                db.commit()
+                for checkout_id in pending_ids:
+                    try:
+                        cancel_checkout(
+                            db, checkout_id, "start_failed", prestart_only=True
+                        )
+                    except Exception:
+                        db.rollback()
+                        exception(
+                            " [payments] failed-start release will retry for checkout %s",
+                            checkout_id,
+                        )
+
+            # Wake any event stream watching an open checkout on this EVSE: the
+            # pre-start page flips "plug in" -> "Preparing" off this status.
+            # Notifying an id nobody watches is a no-op, so no need to be precise.
+            try:
+                open_checkout_ids = (
+                    db.query(CheckoutModel.id)
+                    .join(
+                        ConnectorModel,
+                        CheckoutModel.connector_id == ConnectorModel.id,
+                    )
+                    .filter(ConnectorModel.evse_id == db_evse.id)
+                    .filter(CheckoutModel.transaction_end_time.is_(None))
+                    .filter(CheckoutModel.captured_at.is_(None))
+                    .all()
+                )
+                for (checkout_id,) in open_checkout_ids:
+                    live.notify(checkout_id)
+            except Exception as e:
+                debug(" [CitrineOS] live notify on status failed: %r", e.__str__())
+
+            # Standing "scan to pay" QR: with prepayment enforced the driver plugs
+            # in FIRST and then pays, so the QR must stay up while the connector is
+            # Occupied-but-unpaid, not just while Available. It is cleared when the
+            # paid (or RFID) session actually starts -- see
+            # process_transaction_started_remote -- and for Faulted/Unavailable/
+            # Reserved states here. Only act on a transition (or a first-time
+            # display) so we don't re-push on every repeated StatusNotification.
+            # Best-effort -- a display failure must not break status tracking.
+            qr_states = ("Available", "Occupied")
+            try:
+                if db_evse.status in qr_states and (
+                    previous_status not in qr_states
+                    or db_evse.display_message_id is None
+                ):
+                    await self.push_standing_qr(db, db_evse)
+                elif (
+                    db_evse.status not in qr_states
+                    and db_evse.display_message_id is not None
+                ):
+                    await self.clear_standing_qr(db, db_evse)
+            except Exception as e:
+                exception(" [CitrineOS] Standing-QR update failed: %r", e.__str__())
+            return

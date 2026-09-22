@@ -77,5 +77,14 @@
   "checkout.free.cancel": "Cancel",
   "checkout.free.error.password": "Wrong password.",
   "checkout.free.error.locked": "Too many wrong passwords. Try again in 15 minutes.",
-  "checkout.free.error.unavailable": "Free charging is not enabled on this charger."
+  "checkout.free.error.unavailable": "Free charging is not enabled on this charger.",
+  "charging.button.cancel": "Cancel start",
+  "charging.cancel.confirm": "Cancel this start and release the card authorization?",
+  "charging.cancel.requested": "Canceling and releasing your hold…",
+  "charging.canceled": "Session canceled",
+  "charging.canceled.inactivity": "Canceled after 5 minutes without charging",
+  "charging.settling": "Charging stopped. Finalizing payment…",
+  "charging.inactivity.notice": "If charging does not begin within 5 minutes, we automatically cancel and release the hold. You can cancel now.",
+  "charging.hold.released": "Your card authorization has been canceled. Your bank may take time to remove the pending amount.",
+  "charging.hold.releasing": "Your cancellation is saved. We are releasing the card authorization; you can close this page."
 }

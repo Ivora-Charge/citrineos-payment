@@ -23,6 +23,7 @@ Offline/fault alerting -- tell support before the customer calls.
 """
 
 import asyncio
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from logging import error, info, warning
 
@@ -32,6 +33,186 @@ from sqlalchemy.orm import Session
 
 from config import Config
 from db.init_db import Checkout, get_db
+from utils.payment_lifecycle import (
+    cancel_checkout,
+    checkout_account,
+    checkout_evse,
+    inactivity_deadline,
+    locked_checkout,
+    release_checkout,
+    record_stripe_terminal,
+    utc,
+    reconcile_core_transaction,
+)
+from utils.utils import stripe_account_kwargs
+from utils import live
+import stripe
+
+
+async def payment_recovery_loop(ocpp_integration):
+    """Independent of the 48-hour legacy reaper; runs without a browser open."""
+    while True:
+        try:
+            await recover_payments_once(ocpp_integration)
+        except Exception:
+            error(" [payments] recovery iteration failed", exc_info=True)
+        await asyncio.sleep(max(1, Config.PAYMENT_RECOVERY_INTERVAL_SECONDS))
+
+
+async def recover_payments_once(ocpp_integration, now=None):
+    now = now or datetime.now(timezone.utc)
+    with closing(next(get_db())) as db:
+        ids = [
+            row[0]
+            for row in db.query(Checkout.id)
+            .filter(
+                or_(
+                    Checkout.stop_requested_at.isnot(None),
+                    Checkout.captured_at.is_(None)
+                    & or_(
+                        Checkout.payment_intent_id.isnot(None),
+                        Checkout.source == "free",
+                        Checkout.cancellation_requested_at.isnot(None),
+                    ),
+                ),
+            )
+            .all()
+        ]
+    # A failure for one hold must not prevent other drivers' releases.
+    for checkout_id in ids:
+        try:
+            await _recover_checkout(ocpp_integration, checkout_id, now)
+        except Exception:
+            error(
+                " [payments] recovery failed for checkout %s; will retry",
+                checkout_id,
+                exc_info=True,
+            )
+
+
+async def _recover_checkout(ocpp, checkout_id, now):
+    settle = False
+    with closing(next(get_db())) as db:
+        checkout = locked_checkout(db, checkout_id)
+        if checkout.captured_at is not None:
+            # Releasing money must not abandon a stop when the charger was
+            # offline. Keep retrying until its real transaction has ended.
+            if checkout.stop_requested_at:
+                _retry_settled_stop(db, checkout, ocpp)
+            return
+        if checkout.cancellation_requested_at:
+            release_checkout(db, checkout_id)
+            return
+        reconcile_core_transaction(db, checkout)
+        db.commit()
+        checkout = locked_checkout(db, checkout_id)
+        # Backfill old authorized holds from Stripe's original timestamp, not
+        # deployment time. This also repairs canceled/expired local markers.
+        if checkout.authorized_at is None:
+            if checkout.payment_intent_id:
+                intent = stripe.PaymentIntent.retrieve(
+                    checkout.payment_intent_id,
+                    **stripe_account_kwargs(checkout_account(db, checkout)),
+                )
+                if record_stripe_terminal(checkout, intent):
+                    db.commit()
+                    live.notify(checkout_id)
+                    return
+                checkout.authorized_at = datetime.fromtimestamp(
+                    intent.created, timezone.utc
+                )
+            else:
+                checkout.authorized_at = (
+                    checkout.transaction_start_time or checkout.created_at
+                )
+            db.commit()
+            checkout = locked_checkout(db, checkout_id)
+        if checkout.transaction_end_time is not None:
+            # Unlike the old reaper, retry a completed session after a failed
+            # capture. Its real end timestamp and energy remain unchanged.
+            settle = True
+        elif checkout.remote_request_status == "Rejected":
+            cancel_checkout(db, checkout_id, "start_failed")
+            return
+        else:
+            deadline = inactivity_deadline(checkout)
+            idle = deadline is not None and now >= deadline
+            if not idle and not checkout.stop_requested_at:
+                return
+            if checkout.transaction_start_time is None:
+                cancel_checkout(db, checkout_id, "inactivity", prestart_only=True)
+                return
+            evse = checkout_evse(db, checkout)
+            # Retain the stop request even when the charger is offline.
+            checkout.stop_requested_at = checkout.stop_requested_at or now
+            if idle and not checkout.cancellation_reason:
+                checkout.cancellation_reason = "inactivity"
+            txid = checkout.remote_request_transaction_id
+            # Release this lock before the message sender does other DB reads.
+            db.commit()
+            if txid and evse:
+                ocpp.send_citrineos_message(
+                    station_id=evse.station_id,
+                    tenant_id=evse.tenant_id,
+                    url_path="evdriver/requestStopTransaction",
+                    json_payload={"transactionId": txid},
+                )
+            checkout = locked_checkout(db, checkout_id)
+            if checkout.captured_at is not None:
+                return
+            if not idle:
+                return  # Ordinary manual stop: await the final meter reading.
+            if not checkout.transaction_kwh or checkout.transaction_kwh <= 0:
+                cancel_checkout(db, checkout_id, "inactivity")
+                return
+            # Five minutes without positive meter activity: bill only the last
+            # recorded usage and release the unused authorization now, even if
+            # the charger cannot deliver an Ended event. Never bill idle time.
+            checkout.transaction_end_time = utc(
+                checkout.last_activity_at or checkout.transaction_start_time
+            )
+            db.commit()
+            settle = True
+    if settle:
+        await ocpp.capture_payment_transaction(checkout_id=checkout_id)
+
+
+def _retry_settled_stop(db, checkout, ocpp):
+    evse = checkout_evse(db, checkout)
+    if not evse:
+        return
+    if db.get_bind().dialect.name == "postgresql":
+        row = db.execute(
+            text(
+                'SELECT t."transactionId", t."isActive", t."endTime" '
+                'FROM "Transactions" t JOIN "ChargingStations" s ON s.id=t."stationId" '
+                'LEFT JOIN "Authorizations" a ON a.id=t."authorizationId" '
+                'WHERE s."ocppConnectionName"=:station AND s."tenantId"=:tenant '
+                'AND (a."idToken"=:token OR t."transactionId"=:txid) '
+                'ORDER BY t."createdAt" DESC LIMIT 1'
+            ),
+            {
+                "station": evse.station_id,
+                "tenant": int(evse.tenant_id),
+                "token": f"{Config.OCPP_REMOTESTART_IDTAG_PREFIX}{checkout.id}",
+                "txid": checkout.remote_request_transaction_id,
+            },
+        ).first()
+        if row:
+            if not row[1] or row[2]:
+                checkout.stop_requested_at = None
+                db.commit()
+                return
+            checkout.remote_request_transaction_id = row[0]
+    txid = checkout.remote_request_transaction_id
+    db.commit()
+    if txid:
+        ocpp.send_citrineos_message(
+            station_id=evse.station_id,
+            tenant_id=evse.tenant_id,
+            url_path="evdriver/requestStopTransaction",
+            json_payload={"transactionId": txid},
+        )
 
 
 async def reaper_loop(ocpp_integration) -> None:
@@ -200,7 +381,9 @@ def _scan_and_alert(db: Session) -> None:
         {"mins": Config.ALERT_OFFLINE_MINUTES},
     ).fetchall()
     for name, tenant in offline:
-        problems[name] = f"offline > {Config.ALERT_OFFLINE_MINUTES}m (tenant: {tenant or '—'})"
+        problems[name] = (
+            f"offline > {Config.ALERT_OFFLINE_MINUTES}m (tenant: {tenant or '—'})"
+        )
 
     faulted = db.execute(
         text(

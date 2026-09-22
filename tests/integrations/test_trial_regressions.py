@@ -86,7 +86,7 @@ class TrialRegressionTestBase(unittest.TestCase):
     def patch_get_db(self):
         return patch(
             "integrations.citrineos.citrineos.get_db",
-            side_effect=lambda: iter([self.db]),
+            side_effect=lambda: iter([sessionmaker(bind=self.engine)()]),
         )
 
 
@@ -171,7 +171,7 @@ class SettledCheckoutGuardTests(TrialRegressionTestBase):
         self.assertEqual(checkout.transaction_kwh, 1.5)
 
     def test_ended_event_ignored_after_capture(self):
-        checkout = self.a_checkout(
+        self.a_checkout(
             "cp001",
             captured_at=NOW,
             remote_request_transaction_id="5",

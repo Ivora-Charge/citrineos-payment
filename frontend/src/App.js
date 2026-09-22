@@ -37,7 +37,11 @@ export default function App() {
     >
       <div
         className="ampay-container"
-        style={pathname.startsWith('/receipt') ? { alignItems: 'unset', padding: 0, maxWidth: 'unset' } : {}}
+        style={
+          pathname.startsWith('/receipt')
+            ? { alignItems: 'unset', padding: 0, maxWidth: 'unset' }
+            : {}
+        }
       >
         {!pathname.startsWith('/receipt') && (
           <header className="ivora-header">

@@ -27,6 +27,7 @@ def _snapshot(end_time=None, kwh=0.5):
         remote_request_transaction_id="42",
         transaction_start_time=datetime(2026, 8, 3, 18, 0, tzinfo=timezone.utc),
         transaction_end_time=end_time,
+        captured_at=end_time,
         transaction_kwh=kwh,
         power_active_import=7.2,
         transaction_soc=55.0,
